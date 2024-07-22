@@ -1,16 +1,19 @@
 [tool.poetry]
-name = "sample-project"
+name = "git-py"
 version = "0.1.0"
 description = ""
-authors = ["Author Name <author@example.com>"]
-# readme = "README.md"
-# license = "BSD"
+authors = ["Guangchu Shi <rollschild@protonmail.com>"]
+readme = "README.md"
+license = "MIT"
 packages = [
-  { include = "sample_package" }
+  { include = "git-py" }
 ]
 
 [tool.poetry.dependencies]
 python = "^3.10"
+
+[tool.poetry.scripts]
+git-py = "git-py.main:main"
 
 [build-system]
 requires = ["poetry-core"]
