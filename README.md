@@ -11,7 +11,7 @@ To get started, run the following:
 ```
 $ nix develop
 $ poetry install
-$ poetry run pit
+$ poetry run pit <command>
 ```
 
 ## Development Logs

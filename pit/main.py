@@ -1,8 +1,8 @@
-import libgit
+from pit.libgit import *
 
 
 def main():
-    libgit.main()
+    libgit()
 
 
 if __name__ == "main":
