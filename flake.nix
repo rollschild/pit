@@ -1,5 +1,5 @@
 {
-  description = "Git implemented in Python";
+  description = "pit, Git implemented in Python";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -34,7 +34,7 @@
           };
 
           devShell = pkgs.mkShell rec {
-            name = "git-py";
+            name = "pit";
             packages = with pkgs; [
               (mkPoetryEnv { projectDir = self; })
               poetry

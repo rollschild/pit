@@ -1,4 +1,4 @@
-# git-py
+# pit
 
 [![built with nix](https://builtwithnix.org/badge.svg)](https://builtwithnix.org)
 
@@ -11,7 +11,7 @@ To get started, run the following:
 ```
 $ nix develop
 $ poetry install
-$ poetry run git-py
+$ poetry run pit
 ```
 
 ## Development Logs
