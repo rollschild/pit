@@ -14,6 +14,12 @@ $ poetry install
 $ poetry run pit <command>
 ```
 
+## Supported Git Commands
+
+- `pit init` - `git init`
+- `pit cat-file <type> <object-id>` - `git cat-file <object-id>`
+- `pit hash-object [-w] [-t TYPE] FILE` -
+
 ## Development Logs
 
 ### `.git` directory
@@ -66,6 +72,9 @@ $ poetry run pit <command>
     - make a commit
     - checkout a different branch
     - perform a merge/rebase
+- `cat-file` - prints _raw_ contents of an object to stdout
+  - _uncompressed_
+  - _without_ git header
 - `git cat-file -p <commit-id>`
   - show an object from the `.git/objects/` database
   - shows a **tree** ID
@@ -83,6 +92,11 @@ $ poetry run pit <command>
 ### Storing Objects
 
 - the [Deflate Algorithm](https://zlib.net/feldspar.html)
+- Format of a Git object?
+  - `blob <size><null_byte><content>`
+  - `commit <size><null_byte><content>`
+  - `tag <size><null_byte><content>`
+  - `tree <size><null_byte><content>`
 - how does Git stores a blob?
   - `blob <length><null_byte><content>`
   - compress with DEFLATE algo
@@ -94,4 +108,14 @@ $ poetry run pit <command>
 - Git hashes objects _before_ compressing them
   - using SHA-1
   - it hashes `blob` + `<size>` + `<string>`
--
+- `hash-object`
+  - reads a file
+  - computes its hash as an object
+  - stores the hash in repository (`-w` specified), or just prints the hash
+  - defaults to `blob` if no `type` specified
+
+#### Packfiles
+
+- Git has a second object storage mechanism - **packfiles**
+- more efficient, more complex, than **loose objects**
+- stored in `.git/objects/pack/`

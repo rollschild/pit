@@ -2,6 +2,7 @@
 Main implementation of pit
 """
 
+from abc import ABC, abstractmethod
 import argparse
 from genericpath import isdir
 from pathlib import Path
@@ -21,14 +22,216 @@ argparser = argparse.ArgumentParser(description="The Git Version Control System"
 argsubparsers = argparser.add_subparsers(title="Commands", dest="command")
 argsubparsers.required = True
 
-argsp = argsubparsers.add_parser("init", help="Initialize a new, empty repository")
-argsp.add_argument(
+init_args = argsubparsers.add_parser("init", help="Initialize a new, empty repository")
+init_args.add_argument(
     "path",
     metavar="directory",
     nargs="?",
     default=".",
     help="Where to create the repository",
 )
+
+cat_file_args = argsubparsers.add_parser(
+    "cat-file", help="Provide content of repository objects"
+)
+cat_file_args.add_argument(
+    "type",
+    metavar="type",
+    choices=["blob", "commit", "tag", "tree"],
+    help="Specify the type of object",
+)
+cat_file_args.add_argument(
+    "object_id", metavar="object_id", help="ID of the object to display"
+)
+
+hash_object_args = argsubparsers.add_parser(
+    "hash-object", help="Compute object ID and optionally creates a blob from file"
+)
+hash_object_args.add_argument(
+    "-t",
+    metavar="type",
+    dest="type",
+    choices=["blob", "commit", "tag", "tree"],
+    default="blob",
+    help="Specify the type",
+)
+hash_object_args.add_argument(
+    "-w",
+    dest="write",
+    action="store_true",
+    help="Actually write the object into the database",
+)
+hash_object_args.add_argument("path", help="Read object from <file>")
+
+
+class GitObject(ABC):
+    """
+    Parent class for Git Objects: blob, tree, commit, etc
+    """
+
+    def __init__(self, data=None) -> None:
+        if data is not None:
+            self.deserialize(data)
+        else:
+            self.init()
+
+    @abstractmethod
+    def serialize(self, repo):
+        """
+        This function MUST be implemented by subclasses
+        """
+
+    @abstractmethod
+    def deserialize(self, data):
+        """
+        This function MUST be implemented by subclasses
+        """
+
+    def init(self):
+        pass
+
+
+class GitBlob(GitObject):
+    fmt = b"blob"
+    # blobdata = None
+
+    def serialize(self):
+        return self.blobdata
+
+    def deserialize(self, data):
+        self.blobdata = data
+
+
+def object_read(repo, sha: str) -> GitBlob | None:
+    """
+    Read object SHA from Git repo.
+    Return a GitObject whose type depends on the object.
+    """
+
+    # `.git/objects/eb/abcde...`
+    path = repo_path_to_file(repo, "objects", sha[0:2], sha[2:])
+
+    if not path or not os.path.isfile(path):
+        return None
+
+    # read, binary mode
+    with open(path, "rb") as f:
+        raw = zlib.decompress(f.read())
+        # read object type
+        x = raw.find(b" ")
+        fmt = raw[0:x]  # blob <length>
+
+        # read and validate object size
+        y = raw.find(b"\x00", x)  # hex null byte
+        size = int(raw[x:y].decode("ascii"))
+
+        # 01234
+        #   ^ <-- null byte is at this position
+        if size != len(raw) - y - 1:
+            raise Exception("Malformed object {0}: bad length".format(sha))
+
+        # pick constructor
+        match fmt:
+            case b"commit":
+                c = GitCommit
+            case b"tree":
+                c = GitTree
+            case b"tag":
+                c = GitTag
+            case b"blob":
+                c = GitBlob
+            case _:
+                raise Exception(
+                    "Unknown type {0} for object {1}!".format(fmt.decode("ascii"), sha)
+                )
+
+        return c(raw[y + 1 :])
+
+
+def object_write(obj: GitBlob, repo=None) -> str:
+    """
+    Write an object.
+    Steps:
+        1. compute the hash
+        2. insert the  header
+        3. zlib-compress _everything_
+        4. write result in the correct location
+    """
+
+    # serialize object data
+    data = obj.serialize()
+
+    # add header
+    # encode into bytes
+    result = obj.fmt + b" " + str(len(data)).encode() + b"\x00" + data
+
+    # compute hash
+    sha = hashlib.sha1(result).hexdigest()
+
+    if repo:
+        # compute path
+        path = repo_path_to_file(repo, "objects", sha[0:2], sha[2:], mkdir=True)
+        if not path:
+            raise Exception("Unable to write object!")
+
+        if not os.path.exists(path):
+            # writing, binary mode
+            with open(path, "wb") as f:
+                # compress and write
+                f.write(zlib.compress(result))
+
+    return sha
+
+
+def cmd_cat_file(args):
+    """`pit cat-file <type> <object-id>` handler"""
+    repo = repo_find_root()
+    cat_file(repo, args.object_id, fmt=args.type.encode())
+
+
+def cat_file(repo, obj_id, fmt=None):
+    obj = object_read(repo, object_find(repo, obj_id, fmt=fmt))
+    if obj is not None:
+        sys.stdout.buffer.write(obj.serialize())
+
+
+def object_find(repo, name, fmt=None, follow=True):
+    """
+    Name resolution function to find an object
+    """
+    return name
+
+
+def cmd_hash_object(args):
+    """
+    `pit hash-object [-w] [-t TYPE] FILE` handler
+    """
+
+    repo = repo_find_root() if args.write else None
+
+    with open(args.path, "rb") as fd:
+        sha = object_hash(fd, args.type.encode(), repo)
+        print(sha)
+
+
+def object_hash(fd, fmt, repo=None) -> str | None:
+    """Hash object, writing to repo if provided"""
+    data = fd.read()
+    obj = None
+    match fmt:
+        case b"commit":
+            obj = GitCommit(data)
+        case b"tree":
+            obj = GitTree(data)
+        case b"tag":
+            obj = GitTag(data)
+        case b"blob":
+            obj = GitBlob(data)
+        case _:
+            raise Exception("Unknown type %s!" % fmt)
+
+    # if `repo` provided, write object to database
+    return object_write(obj, repo) if obj else None
 
 
 class GitRepository:
@@ -131,19 +334,23 @@ def repo_create(path: str):
     assert repo_make_dir(repo, "refs", "heads", mkdir=True)
 
     # `.git/description`
-    with open(repo_path_to_file(repo, "description"), "w") as f:
-        f.write(
-            "Unnamed repository; edit this file 'description' to name the repository.\n"
-        )
+    # use assignment expression to handle None cases
+    if ptf := repo_path_to_file(repo, "description"):
+        with open(ptf, "w") as f:
+            f.write(
+                "Unnamed repository; edit this file 'description' to name the repository.\n"
+            )
 
     # `.git/HEAD`
-    with open(repo_path_to_file(repo, "HEAD"), "w") as f:
-        f.write("ref: refs/heads/main\n")
+    if ptf := repo_path_to_file(repo, "HEAD"):
+        with open(ptf, "w") as f:
+            f.write("ref: refs/heads/main\n")
 
     # `.git/config`
-    with open(repo_path_to_file(repo, "config"), "w") as f:
-        config = repo_default_config()
-        config.write(f)
+    if ptf := repo_path_to_file(repo, "config"):
+        with open(ptf, "w") as f:
+            config = repo_default_config()
+            config.write(f)
 
     return repo
 
@@ -153,21 +360,43 @@ def cmd_init(args):
     repo_create(args.path)
 
 
+def repo_find_root(path=".", required=True) -> GitRepository | None:
+    """
+    Find the root of the current Git repository
+    """
+    # find the canonical path - eliminating symlinks
+    path = os.path.realpath(path)
+
+    if os.path.isdir(os.path.join(path, ".git")):
+        # already Git repo
+        return GitRepository(path)
+
+    parent = os.path.realpath(os.path.join(path, ".."))
+    if parent == path:
+        # we are at root (`/`)
+        if required:
+            raise Exception("No Git repository found!")
+        return None
+
+    # resursive
+    return repo_find_root(parent, required)
+
+
 def libgit(argv=sys.argv[1:]):
     args = argparser.parse_args(argv)
     match args.command:
         # case "add":
         # cmd_add(args)
-        # case "cat-file":
-        # cmd_cat_file(args)
+        case "cat-file":
+            cmd_cat_file(args)
         # case "check-ignore":
         # cmd_check_ignore(args)
         # case "checkout":
         # cmd_checkout(args)
         # case "commit":
         # cmd_commit(args)
-        # case "hash-object":
-        # cmd_hash_object(args)
+        case "hash-object":
+            cmd_hash_object(args)
         case "init":
             cmd_init(args)
         # case "log":
