@@ -18,7 +18,9 @@ $ poetry run pit <command>
 
 - `pit init` - `git init`
 - `pit cat-file <type> <object-id>` - `git cat-file <object-id>`
-- `pit hash-object [-w] [-t TYPE] FILE` -
+- `pit hash-object [-w] [-t TYPE] FILE`
+- `pit log <commit-id>`
+-
 
 ## Development Logs
 
