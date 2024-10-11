@@ -119,3 +119,31 @@ $ poetry run pit <command>
 - Git has a second object storage mechanism - **packfiles**
 - more efficient, more complex, than **loose objects**
 - stored in `.git/objects/pack/`
+
+### Commits
+
+- uncompressed commit object:
+
+  ```
+  tree <hash>
+  parent <hash>
+  author <>
+  committer <>
+  <PGP>
+
+  <commit_message>
+  ```
+
+- Git has two strong rules about object identity:
+  - **the same name will always refer to the same object**
+    - object's name is always hash of its content
+  - **the same object will always be referred by the same name**
+    - there shouldn't be two equivalent objects under different names
+- What does a commit consist of?
+  - a tree object
+  - zero/one/more parents
+  - author identity (name, email) and timestamp
+  - committer identity
+  - optional PGP signature
+  - message
+-

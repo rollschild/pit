@@ -63,6 +63,9 @@ hash_object_args.add_argument(
 )
 hash_object_args.add_argument("path", help="Read object from <file>")
 
+log_args = argsubparsers.add_parser("log", help="Display history of a given commit")
+log_args.add_argument("commit", default="HEAD", nargs="?", help="Commit to start at")
+
 
 class GitObject(ABC):
     """
@@ -93,7 +96,6 @@ class GitObject(ABC):
 
 class GitBlob(GitObject):
     fmt = b"blob"
-    # blobdata = None
 
     def serialize(self):
         return self.blobdata
@@ -102,7 +104,67 @@ class GitBlob(GitObject):
         self.blobdata = data
 
 
-def object_read(repo, sha: str) -> GitBlob | None:
+class GitCommit(GitObject):
+    fmt = b"commit"
+
+    def deserialize(self, data):
+        self.kvlm = kvlm_parse(data)
+
+    def serialize(self):
+        return kvlm_serialize(self.kvlm)
+
+    def init(self):
+        # dict()
+        self.kvlm = collections.OrderedDict()
+
+
+def cmd_log(args):
+    """`git log` handler"""
+    repo = repo_find_root()
+    print("digraph pitlog{")
+    print("  node[shape=rect]")
+    log_graphviz(repo, object_find(repo, args.commit), set())
+    print("}")
+
+
+def log_graphviz(repo, sha, seen: set):
+    """Simple graph of git logs"""
+
+    if sha in seen:
+        return
+    seen.add(sha)
+
+    commit = object_read(repo, sha)
+    if not commit or not isinstance(commit, GitCommit):
+        return
+    short_hash = sha[0:8]
+
+    message = commit.kvlm[None].decode("utf8").strip()
+    message = message.replace("\\", "\\\\")
+    message = message.replace('"', '\\"')
+
+    if "\n" in message:
+        # keep only the first line
+        message = message[: message.index("\n")]
+
+    print('  c_{0} [label="{1}: {2}"]'.format(sha, short_hash, message))
+    assert commit.fmt == b"commit"
+
+    if not b"parent" in commit.kvlm.keys():
+        # base case: the initial commit
+        return
+
+    parents = commit.kvlm[b"parent"]
+    if type(parents) is not list:
+        parents = [parents]
+
+    for p in parents:
+        p = p.decode("ascii")  # p is sha of parent commit
+        print("  c_{0} -> c_{1};".format(sha, p))
+        log_graphviz(repo, p, seen)
+
+
+def object_read(repo, sha: str) -> GitBlob | GitCommit | None:
     """
     Read object SHA from Git repo.
     Return a GitObject whose type depends on the object.
@@ -134,10 +196,10 @@ def object_read(repo, sha: str) -> GitBlob | None:
         match fmt:
             case b"commit":
                 c = GitCommit
-            case b"tree":
-                c = GitTree
-            case b"tag":
-                c = GitTag
+            # case b"tree":
+            # c = GitTree
+            # case b"tag":
+            # c = GitTag
             case b"blob":
                 c = GitBlob
             case _:
@@ -148,7 +210,7 @@ def object_read(repo, sha: str) -> GitBlob | None:
         return c(raw[y + 1 :])
 
 
-def object_write(obj: GitBlob, repo=None) -> str:
+def object_write(obj: GitBlob | GitCommit, repo=None) -> str:
     """
     Write an object.
     Steps:
@@ -221,10 +283,10 @@ def object_hash(fd, fmt, repo=None) -> str | None:
     match fmt:
         case b"commit":
             obj = GitCommit(data)
-        case b"tree":
-            obj = GitTree(data)
-        case b"tag":
-            obj = GitTag(data)
+        # case b"tree":
+        # obj = GitTree(data)
+        # case b"tag":
+        # obj = GitTag(data)
         case b"blob":
             obj = GitBlob(data)
         case _:
@@ -382,6 +444,81 @@ def repo_find_root(path=".", required=True) -> GitRepository | None:
     return repo_find_root(parent, required)
 
 
+def kvlm_parse(raw: bytearray, start=0, dict=None) -> collections.OrderedDict:
+    """
+    Recursively reads key/value pair, then call itself back with the new position.
+    """
+
+    if not dict:
+        dict = collections.OrderedDict()
+
+    space = raw.find(b" ", start)  # space, as keyword delimiter
+    nl = raw.find(b"\n", start)  # newline
+
+    # If space appears before newline, we have a keyword.
+    # Otherwise, it's the final message, which just read to then end of the file.
+
+    # Base case
+    # If newline appears first (or no space at all), we assume a blank line.
+    # Blank line means the remainder of data is the commit message. We store it in
+    # dict with `None` as key, then return
+    if (space < 0) or (nl < space):
+        assert nl == start
+        dict[None] = raw[start + 1 :]
+        return dict
+
+    # Recursive case
+    # Read a key/value pair and recurse for the next
+    key = raw[start:space]
+
+    # Find the end of the value
+    # Continuation lines (of a multi-line value) begins with a space for each
+    # subsequent line.
+    # Loop until we find a "\n" not followed by a space.
+    end = start
+    while True:
+        end = raw.find(b"\n", end + 1)
+        if raw[end + 1] != ord(" "):
+            break
+
+    # Grab the value.
+    # Drop the _leading_ space on continuation lines.
+    value = raw[space + 1 : end].replace(b"\n ", b"\n")
+
+    # Do _NOT_ overwrite existing data in dict
+    if key in dict:
+        if type(dict[key]) is list:
+            dict[key].append(value)
+        else:
+            dict[key] = [dict[key], value]
+    else:
+        dict[key] = value
+
+    return kvlm_parse(raw, start=end + 1, dict=dict)
+
+
+def kvlm_serialize(kvlm: collections.OrderedDict) -> bytearray:
+    """Convert the commit object OrderedDict to bytes string"""
+
+    ret = b""
+    for k in kvlm.keys():
+        # skip the commit message itself
+        if k == None:
+            continue
+
+        val = kvlm[k]
+        # Normalize `val` to a list
+        if type(val) != list:
+            val = [val]
+
+        for v in val:
+            ret += k + b" " + (v.replace(b"\n", b"\n ")) + b"\n"
+
+    # Append commit message
+    ret += b"\n" + kvlm[None] + b"\n"
+    return ret
+
+
 def libgit(argv=sys.argv[1:]):
     args = argparser.parse_args(argv)
     match args.command:
@@ -399,8 +536,8 @@ def libgit(argv=sys.argv[1:]):
             cmd_hash_object(args)
         case "init":
             cmd_init(args)
-        # case "log":
-        # cmd_log(args)
+        case "log":
+            cmd_log(args)
         # case "ls-files":
         # cmd_ls_files(args)
         # case "ls-tree":
