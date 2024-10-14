@@ -16,6 +16,7 @@ from math import ceil
 import os
 import re
 import sys
+from typing import List
 import zlib
 
 argparser = argparse.ArgumentParser(description="The Git Version Control System")
@@ -66,6 +67,91 @@ hash_object_args.add_argument("path", help="Read object from <file>")
 log_args = argsubparsers.add_parser("log", help="Display history of a given commit")
 log_args.add_argument("commit", default="HEAD", nargs="?", help="Commit to start at")
 
+ls_tree_args = argsubparsers.add_parser("ls-tree", help="Pretty-print a tree object.")
+# store True/False into the variable if -r specified
+ls_tree_args.add_argument(
+    "-r", dest="recursive", action="store_true", help="Recurse into sub-trees"
+)
+ls_tree_args.add_argument("tree_id", help="ID of a tree-ish object")
+
+checkout_args = argsubparsers.add_parser(
+    "checkout", help="Checkout a commit inside of a directory."
+)
+checkout_args.add_argument("commit_id", help="The commit or tree to checkout")
+checkout_args.add_argument("path", help="The EMPTY directory to checkout on")
+
+
+def cmd_ls_tree(args):
+    """`pit ls-tree` handler"""
+    repo = repo_find_root()
+    ls_tree(repo, args.tree_id, args.recursive)
+
+
+def ls_tree(repo, ref, recursive=None, prefix=""):
+    """Recursively list tree content"""
+
+    sha = object_find(repo, ref, fmt=b"tree")
+    obj = object_read(repo, sha)
+
+    if not obj or not isinstance(obj, GitTree):
+        return
+
+    assert obj.fmt == b"tree"
+    for item in obj.items:
+        type = item.filemode[0:1] if len(item.filemode) == 5 else item.filemode[0:2]
+
+        match type:
+            case b"04":
+                type = "tree"
+            case b"10":
+                type = "blob"
+            case b"12":
+                type = "blob"  # symlink
+            case b"16":
+                type = "commit"  # a submodule?
+            case _:
+                raise Exception("Weird tree node mode {}".format(item.filemode))
+
+        if not (recursive and type == "tree"):
+            print(
+                "{0} {1} {2}\t{3}".format(
+                    "0" * (6 - len(item.filemode)) + item.filemode.decode("ascii")
+                ),
+                type,
+                item.sha,
+                os.path.join(prefix, item.path),
+            )
+        else:
+            ls_tree(repo, item.sha, recursive, os.path.join(prefix, item.path))
+
+
+def tree_parse_single(raw: bytearray, start=0):
+    """
+    Parse a single Tree entry, return the next position to parse and current GitTreeNode.
+    [mode] space [path] 0x00 [sha-1]
+    """
+
+    x = raw.find(b" ", start)
+    assert x - start == 5 or x - start == 6
+
+    filemode = raw[start:x]
+    if len(filemode) == 5:
+        # Normalize to six bytes
+        filemode = b" " + filemode
+
+    # Find NULL terminator of the path
+    y = raw.find(b"\x00", x)
+    # then read the path
+    path = raw[x + 1 : y]
+
+    # read SHA
+    # set its length to 40 hex characters, and pad with leading zeroes
+    # 40 is full length of a hex-encoded SHA-1, which is 20 bytes
+    # we need full 40-character hex string (even with leading 0s) because Git
+    # uses the first 2 chars to build path to `.git/objects/ab/`
+    sha = format(int.from_bytes(raw[y + 1 : y + 21], "big"), "040x")
+    return y + 21, GitTreeNode(filemode, path.decode("utf8"), sha)
+
 
 class GitObject(ABC):
     """
@@ -92,6 +178,65 @@ class GitObject(ABC):
 
     def init(self):
         pass
+
+
+class GitTreeNode:
+    def __init__(self, filemode, path, sha) -> None:
+        self.filemode = filemode
+        self.path = path
+        self.sha = sha
+
+
+class GitTree(GitObject):
+    fmt = b"tree"
+
+    def init(self):
+        print("init called in %s" % self.__class__.__name__)
+        self.items = list()
+
+    def serialize(self):
+        return tree_serialize(self)
+
+    def deserialize(self, data: bytearray):
+        self.items = tree_parse(data)
+
+
+def tree_parse(raw: bytearray) -> List[GitTreeNode]:
+    pos = 0
+    max_len = len(raw)
+    ret = list()
+
+    while pos < max_len:
+        pos, data = tree_parse_single(raw, pos)
+        ret.append(data)
+
+    return ret
+
+
+def tree_node_sort_key(node: GitTreeNode):
+    """
+    Called on every element in the list before being sorted
+    """
+    if node.filemode.startswith(b"10"):
+        # if filemode starts with `10` then it's a blob
+        return node.path
+    else:
+        # otherwise a directory
+        return node.path + "/"
+
+
+def tree_serialize(obj: GitTree):
+    obj.items.sort(key=tree_node_sort_key)
+    ret = b""
+    for ele in obj.items:
+        ret += ele.filemode
+        ret += b" "
+        ret += ele.path.encode("utf8")
+        ret += b"\x00"
+        sha = int(ele.sha, 16)
+        ret += sha.to_bytes(20, byteorder="big")
+
+    return ret
 
 
 class GitBlob(GitObject):
@@ -164,7 +309,53 @@ def log_graphviz(repo, sha, seen: set):
         log_graphviz(repo, p, seen)
 
 
-def object_read(repo, sha: str) -> GitBlob | GitCommit | None:
+def cmd_checkout(args):
+    """`git checkout <commit>` handler"""
+    repo = repo_find_root()
+
+    obj = object_read(repo, object_find(repo, args.commit_id))
+
+    if not obj:
+        return
+
+    # If object is a commit, grab its tree
+    if obj.fmt == b"commit" and isinstance(obj, GitCommit):
+        obj = object_read(repo, obj.kvlm[b"tree"].decode("ascii"))
+
+    if not isinstance(obj, GitTree):
+        return
+
+    # verify that the path is empty directory
+    if os.path.exists(args.path):
+        if not os.path.isdir(args.path):
+            raise Exception("Not a directory {0}!".format(args.path))
+        if os.listdir(args.path):
+            raise Exception("Not empty {0}!".format(args.path))
+    else:
+        os.makedirs(args.path)
+
+    # realpath: canonical path, eliminating any symbolic links
+    tree_checkout(repo, obj, os.path.realpath(args.path))
+
+
+def tree_checkout(repo, tree: GitTree, path):
+    """Checkout a tree"""
+    for item in tree.items:
+        obj = object_read(repo, item.sha)
+        if not obj:
+            return
+
+        dest = os.path.join(path, item.path)
+
+        if obj.fmt == b"tree" and isinstance(obj, GitTree):
+            os.mkdir(dest)
+            tree_checkout(repo, obj, dest)
+        elif obj.fmt == b"blob" and isinstance(obj, GitBlob):
+            with open(dest, "wb") as f:
+                f.write(obj.blobdata)
+
+
+def object_read(repo, sha: str) -> GitBlob | GitCommit | GitTree | None:
     """
     Read object SHA from Git repo.
     Return a GitObject whose type depends on the object.
@@ -196,8 +387,8 @@ def object_read(repo, sha: str) -> GitBlob | GitCommit | None:
         match fmt:
             case b"commit":
                 c = GitCommit
-            # case b"tree":
-            # c = GitTree
+            case b"tree":
+                c = GitTree
             # case b"tag":
             # c = GitTag
             case b"blob":
@@ -210,7 +401,7 @@ def object_read(repo, sha: str) -> GitBlob | GitCommit | None:
         return c(raw[y + 1 :])
 
 
-def object_write(obj: GitBlob | GitCommit, repo=None) -> str:
+def object_write(obj: GitBlob | GitCommit | GitTree, repo=None) -> str:
     """
     Write an object.
     Steps:
@@ -283,8 +474,8 @@ def object_hash(fd, fmt, repo=None) -> str | None:
     match fmt:
         case b"commit":
             obj = GitCommit(data)
-        # case b"tree":
-        # obj = GitTree(data)
+        case b"tree":
+            obj = GitTree(data)
         # case b"tag":
         # obj = GitTag(data)
         case b"blob":
@@ -528,8 +719,8 @@ def libgit(argv=sys.argv[1:]):
             cmd_cat_file(args)
         # case "check-ignore":
         # cmd_check_ignore(args)
-        # case "checkout":
-        # cmd_checkout(args)
+        case "checkout":
+            cmd_checkout(args)
         # case "commit":
         # cmd_commit(args)
         case "hash-object":
@@ -540,8 +731,8 @@ def libgit(argv=sys.argv[1:]):
             cmd_log(args)
         # case "ls-files":
         # cmd_ls_files(args)
-        # case "ls-tree":
-        # cmd_ls_tree(args)
+        case "ls-tree":
+            cmd_ls_tree(args)
         # case "rev-parse":
         # cmd_rev_parse(args)
         # case "rm":

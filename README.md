@@ -20,7 +20,8 @@ $ poetry run pit <command>
 - `pit cat-file <type> <object-id>` - `git cat-file <object-id>`
 - `pit hash-object [-w] [-t TYPE] FILE`
 - `pit log <commit-id>`
--
+- `pit ls-tree [-r] <tree-id>`
+- `pit checkout` - `git checkout`
 
 ## Development Logs
 
@@ -148,4 +149,19 @@ $ poetry run pit <command>
   - committer identity
   - optional PGP signature
   - message
--
+
+### Tree
+
+- **tree** describes content of the work tree
+  - associates blobs to paths
+- Array of 3-element tuples:
+  - file mode
+  - path
+  - SHA-1
+    - referring to either a blob or another tree object
+- tree object format: `<filemode> <path><null_byte><sha>`
+- `git ls-tree [-r] <tree-id>`
+  - prints contents of a tree, recursively if `-r` is set
+- `git checkout`
+  - instantiates a commit in worktree
+  -
