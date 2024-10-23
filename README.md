@@ -22,6 +22,13 @@ $ poetry run pit <command>
 - `pit log <commit-id>`
 - `pit ls-tree [-r] <tree-id>`
 - `pit checkout` - `git checkout`
+- `pit tag` - `git tag`
+- `pit tag <name> <object-id>`
+- `pit tag -a <name> <object-id>` - create new **tag object** `<name>`, pointing at `HEAD` (default) or `<object-id>`
+- `pit checkout <commit>`
+- `pit checkout <branch>`
+- `pit cat-file <type> <id>`
+- `pit rev-parse --pit-type <type> <name>`
 
 ## Development Logs
 
@@ -164,4 +171,53 @@ $ poetry run pit <command>
   - prints contents of a tree, recursively if `-r` is set
 - `git checkout`
   - instantiates a commit in worktree
-  -
+
+### Refs, Tags, and Branches
+
+- **Git references**
+- in `.git/refs`
+- are text files containing hex representation of an object's hash, encoded in ASCII
+- refs can refer to another ref: `ref: refs/remotes/origin/master`
+  - **indirect** reference
+- **direct reference**: a ref with SHA-1 object ID
+
+#### Tags
+
+- most simple use of refs
+- a user-defined name for an object
+  - often a commit
+- a very common use: identifying software releases
+  - `git tag v1.2.34 6071c08`
+- like aliasing
+  - a new way to refer to an existing object
+- `git checkout <tag-name>` equivalent to `git checkout <commit-id>`
+- tags are actually refs, living under `.git/refs/tags/`
+- Tags have _two_ flavors:
+  - **lightweight tags**
+    - regular refs to a commit/tree/blob
+  - **tag objects**
+    - regular refs pointing to an object of type `tag`
+    - have author/date/PGP
+    - format same as commit object
+- `git tag`
+  - creates a new tag, or
+  - list existing tags (default behavior)
+
+#### Branches
+
+- a **branch** is a **reference** to a commit
+- branches are refs living in `.git/refs/heads/`
+- Branch vs. Tag:
+  - branches are references to a **commit**; tags can refer to any object
+  - the branch ref is updated at each commit
+- Every time you commit, Git does:
+  1. a new commit object created, with current branch's (commit) ID as its parent
+  2. the commit object is hashed & stored
+  3. the branch ref is updated to refer to the new commit's hash
+- the **current** branch lives _outside_ of `.git/refs/`
+  - in `.git/HEAD` - an **indirect ref**, like `ref: path/to/other/ref`, not some hash
+- **Detached HEAD**
+  - when you checkout a random commit
+  - you are not on any branch any more
+  - `.git/HEAD` is a **direct** reference, containing a SHA-1
+-
