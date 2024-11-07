@@ -29,6 +29,9 @@ $ poetry run pit <command>
 - `pit checkout <branch>`
 - `pit cat-file <type> <id>`
 - `pit rev-parse --pit-type <type> <name>`
+- `pit ls-files`
+- `pit check-ignore <paths>`
+- `pit status`
 
 ## Development Logs
 
@@ -220,4 +223,41 @@ $ poetry run pit <command>
   - when you checkout a random commit
   - you are not on any branch any more
   - `.git/HEAD` is a **direct** reference, containing a SHA-1
+
+### Stage Area and the Index File
+
+- **staging area**
+  - the intermediate stage between the last commit and the next commit
+- To **commit** some changes
+  - first, **stage** the changes by `git add`/`git rm`
+  - then `git commit`
+- **index file**
+  - a _binary_ file
+  - holds extra info about files in the worktree, like creation/modification time
+    - so `git status` does _not_ often need to actually compare files
+    - it just checks modification time is same as the one stored in the index file
+  - when repo is _clean_, the index file holds the exact same contents as the HEAD commit, _plus_ metadata about the corresponding filesystem entries
+  - when `git add`/`git rm`, index file is modified accordingly
+    - updated with new blob ID; various metadata updated as well
+    - `git status` knows when not to compare file contents
+  - when `git commit`, a new tree is produced from the index file
+    - new commit object generated with that tree
+    - branches are updated
+- **index file** vs. tree
+  - index file can represent inconsistent states (like merge conflict)
+  - tree is _always_ a complete, unambiguous representation
+- `git ls-files`
+  - displays names of files in the staging area
+- `git check-ignore`
+  - check/list the ignore rules
+  - in various `.gitignore` files
+- Two kinds of ignore files
+  - live in the index - various `gitignore` files
+  - _outside_ the index - _absolute_
+    - global (`~/.config/git/ignore`)
+    - repository-specific `.git/info/exclude`
+- `git status`
+  - compares:
+    - the `HEAD` with the staging area
+    - the staging area with the worktree
 -

@@ -5,6 +5,7 @@ Main implementation of pit
 from abc import ABC, abstractmethod
 import argparse
 from genericpath import isdir
+from os.path import isabs
 from pathlib import Path
 import collections
 import configparser
@@ -111,6 +112,151 @@ rev_parse_args.add_argument(
     help="Specify the expected type to parse",
 )
 rev_parse_args.add_argument("name", help="The name to parse")
+
+ls_files_args = argsubparsers.add_parser("ls-files", help="List all the stage files.")
+ls_files_args.add_argument(
+    "--verbose", dest="verbose", action="store_true", help="Show everything."
+)
+
+check_ignore_args = argsubparsers.add_parser(
+    "check-ignore", help="Check path(s) against ignore rules."
+)
+check_ignore_args.add_argument("path", nargs="+", help="Paths to check")
+
+status_args = argsubparsers.add_parser("status", help="Show the working tree status.")
+
+
+def cmd_check_ignore(args):
+    """`git check-ignore` handler"""
+    repo = repo_find_root()
+    if repo is None:
+        raise Exception("Unable to find repository!")
+    rules = gitignore_read(repo)
+    for path in args.path:
+        if check_ignore(rules, path):
+            print(path)
+
+
+def gitignore_parse_line(raw):
+    """
+    Parse each line of the `.gitignore` file
+    Rules:
+        - lines starting with `!` negates the pattern - not ignored
+        - lines starting with `#` are comments & skipped
+        - a backlash `\\` at the beginning treats `!` and `#` as literal characters
+    """
+    raw = raw.strip()  # remove leading/trailing spaces
+    if not raw or raw[0] == "#":
+        return None
+    if os.path.isdir(raw) and raw.endswith("/"):
+        raw = raw + "**"
+    if raw[0] == "!":
+        return (raw[1:], False)
+    elif raw[0] == "\\":
+        return (raw[1:], True)
+    else:
+        return (raw, True)
+
+
+def gitignore_parse_file(lines):
+    ret = list()
+    for line in lines:
+        parsed = gitignore_parse_line(line)
+        if parsed:
+            ret.append(parsed)
+
+    return ret
+
+
+class GitIgnore:
+    absolute = list()
+    scoped = dict()
+
+    def __init__(self, absolute: list, scoped: dict) -> None:
+        self.absolute = absolute
+        self.scoped = scoped
+
+
+INDEX_FILE_MODE_DICT: dict[int, str] = {
+    0b1000: "regular file",
+    0b1010: "symlink",
+    0b1110: "git link",
+}
+
+
+class GitRepository:
+    """A Git Repository"""
+
+    worktree = ""
+    gitdir = ""
+    config = None
+
+    def __init__(self, path, force=False) -> None:
+        self.worktree = path
+        # string path of `.git`
+        self.gitdir: str = os.path.join(path, ".git")
+
+        if not (force or os.path.isdir(self.gitdir)):
+            raise Exception("Not a Git repository: %s" % path)
+
+        # Read configuration file in `.git/config`
+        self.config = configparser.ConfigParser()
+        cf = repo_path_to_file(self, "config")
+
+        if cf and os.path.exists(cf):
+            self.config.read([cf])
+        elif not force:
+            raise Exception("Configuration file missing")
+
+        if not force:
+            vers = int(self.config.get("core", "repositoryformatversion"))
+            if vers != 0:
+                raise Exception("Unsupported repositoryformatversion: %s" % vers)
+
+
+def cmd_ls_files(args):
+    """`git ls-files` handler"""
+    repo = repo_find_root()
+    if repo is None:
+        raise Exception("Unable to find repository!")
+    index = index_read(repo)
+    if args.verbose:
+        print(
+            f"Index file format v{index.version}, containing {len(index.entries)} entries."
+        )
+
+    for entry in index.entries:
+        print(entry.name)
+        if args.verbose:
+            # `:o` - octal
+            print(
+                "    {} with perms: {:o}".format(
+                    INDEX_FILE_MODE_DICT[entry.mode_type], entry.mode_perms
+                )
+            )
+            print("    on blob: {}".format(entry.sha))
+            print(
+                "    created: {}.{}, modified: {}.{}".format(
+                    datetime.fromtimestamp(entry.ctime[0]),
+                    entry.ctime[1],
+                    datetime.fromtimestamp(entry.mtime[0]),
+                    entry.mtime[1],
+                )
+            )
+            print("    device: {}, inode: {}".format(entry.dev, entry.ino))
+            print(
+                "    user: {} ({}) group: {} ({})".format(
+                    pwd.getpwuid(entry.uid).pw_name,
+                    entry.uid,
+                    grp.getgrgid(entry.gid).gr_name,
+                    entry.gid,
+                )
+            )
+            print(
+                "    flags: stage={} assume_valid={}".format(
+                    entry.flag_stage, entry.flag_assume_valid
+                )
+            )
 
 
 def cmd_rev_parse(args):
@@ -386,6 +532,235 @@ class GitCommit(GitObject):
 
 class GitTag(GitCommit):
     fmt = b"tag"
+
+
+class GitIndexEntry:
+    def __init__(
+        self,
+        ctime=None,
+        mtime=None,
+        dev=None,
+        ino=None,
+        mode_type=None,
+        mode_perms=None,
+        uid=None,
+        gid=None,
+        fsize=None,
+        sha=None,
+        flag_assume_valid=None,
+        flag_stage=None,
+        name=None,
+    ) -> None:
+        # last time a file's metadata changed
+        # a pair (timestamp in seconds, nanoseconds)
+        if not isinstance(ctime, tuple):
+            raise Exception("Invalid argument ctime!")
+        self.ctime = ctime
+        # last time a file's data changed
+        # a pair (timestamp in seconds, nanoseconds)
+        if not isinstance(mtime, tuple):
+            raise Exception("Invalid argument mtime!")
+        self.mtime = mtime
+        # ID of device containing this file
+        self.dev = dev
+        # file's inode number
+        self.ino = ino
+        # object type, one of:
+        #   - b1000 (regular)
+        #   - b1010 (symlink)
+        #   - b1110 (gitlink)
+        if type(mode_type) is not int:
+            raise Exception("Invalid argument: mode_type is not an int!")
+        self.mode_type: int = int(mode_type)
+        # object permissions, an integer
+        self.mode_perms = mode_perms
+        # user ID of owner
+        if type(uid) is not int:
+            raise Exception("Invalid argument: uid")
+        self.uid = uid
+        # group ID of owner
+        if type(gid) is not int:
+            raise Exception("Invalid argument: gid")
+        self.gid = gid
+        # size of the object, in bytes
+        self.fsize = fsize
+        # object's SHA
+        if type(sha) is not str:
+            raise Exception("Invalid argument: sha")
+        self.sha = sha
+        self.flag_assume_valid = flag_assume_valid
+        self.flag_stage = flag_stage
+        # name of the object, in FULL PATH
+        if type(name) is not str:
+            raise Exception("Invalid argument: name")
+        self.name = name
+
+
+class GitIndex:
+    """
+    Format of the index file:
+        - a header with:
+            - the `DIRC` magic bytes,
+            - a version number,
+            - total number of entries in that index file
+        - series of entries, sorted, each representing a file; padded to multiple of 8 bytes
+        - series of optional extensions
+    """
+
+    version = None
+    entries: list[GitIndexEntry] = []
+    # ext = None
+    # sha = None
+
+    def __init__(self, version=2, entries=None) -> None:
+        if not entries:
+            entries = list()
+
+        self.version = version
+        self.entries = entries
+
+
+def cmd_status(_):
+    """
+    1. Check active branch or "detached HEAD"
+    2. check difference between index and the work tree ("changes not staged for commit")
+    3. check difference between HEAD and index ("changes to be committed"/"untracked files")
+    """
+    repo = repo_find_root()
+    if repo is None:
+        raise Exception("Unable to find a repository!")
+    index = index_read(repo)
+
+    cmd_status_branch(repo)
+    cmd_status_head_index(repo, index)
+    print()
+    cmd_status_index_worktree(repo, index)
+
+
+def branch_get_active(repo):
+    """Get what branch we are on, by looking at `.git/HEAD`"""
+    head_file = repo_path_to_file(repo, "HEAD")
+    if head_file is None:
+        raise Exception("Unable to read file `.git/HEAD`!")
+    with open(head_file, "r") as f:
+        head = f.read()
+
+    if head is not None and head.startswith("ref: refs/heads/"):
+        # indirect reference to the active branch
+        return head[16:-1]
+
+    # head is an hex ID - a ref to a commit, in detached HEAD state
+    return False
+
+
+def tree_to_dict(repo, ref, prefix=""):
+    """
+    Convert a tree to a (flat) dict.
+    """
+    ret = dict()
+    tree_sha = object_find(repo, ref, fmt=b"tree")
+    if tree_sha is None:
+        raise Exception(f"Unable to find the tree sha with ref {ref}")
+    tree = object_read(repo, tree_sha)
+    if not isinstance(tree, GitTree):
+        raise Exception("Unable to find the tree!")
+
+    for node in tree.items:
+        full_path = os.path.join(prefix, node.path)
+        if is_subtree := node.filemode.startswith(b"04"):
+            ret.update(tree_to_dict(repo, node.sha, full_path))
+        else:
+            ret[full_path] = node.sha
+
+    return ret
+
+
+def cmd_status_head_index(repo, index: GitIndex):
+    print("Changes to be committed:")
+    head = tree_to_dict(repo, "HEAD")
+    for entry in index.entries:
+        if entry.name in head:
+            if head[entry.name] != entry.sha:
+                print("  modified:", entry.name)
+            del head[entry.name]  # delete the key
+        else:
+            print("  added:    ", entry.name)
+
+    # keys still in HEAD are files that we have _not_ met in the index
+    # these files have been deleted
+    for entry in head.keys():
+        print("  deleted: ", entry)
+
+
+def cmd_status_index_worktree(repo: GitRepository, index: GitIndex):
+    """
+    Find changes between index and worktree.
+    """
+    print("Changes not staged for commit:")
+
+    ignore = gitignore_read(repo)
+
+    # `os.path.sep`: character seperating path components on a particular OS
+    gitdir_prefix = repo.gitdir + os.path.sep
+    all_files = list()
+
+    # begin by walking the filesystem, get all files in there
+    # top-down by default
+    # `os.walk` returns:
+    #   - dirpath
+    #   - dirnames
+    #   - filenames
+    for root, _, files in os.walk(repo.worktree, True):
+        if root == repo.gitdir or root.startswith(gitdir_prefix):
+            continue
+        for f in files:
+            full_path = os.path.join(root, f)
+            rel_path = os.path.relpath(full_path, repo.worktree)
+            all_files.append(rel_path)
+
+    # Now traverse the index, and compare real files with the cached versions
+    for entry in index.entries:
+        full_path = os.path.join(repo.worktree, entry.name)
+        if not os.path.exists(full_path):
+            # file in index but _not_ in filesystem - it's deleted
+            print("  deleted: ", entry.name)
+        else:
+            stat = os.stat(full_path)
+
+            # Compare metadata
+            ctime_ns = entry.ctime[0] * 10**9 + entry.ctime[1]
+            mtime_ns = entry.mtime[0] * 10**9 + entry.mtime[1]
+            if (stat.st_ctime_ns != ctime_ns) or (stat.st_mtime_ns != mtime_ns):
+                # If different, deep compare
+                # @FIXME - this **will** crash on symlinks to dir
+                with open(full_path, "rb") as fd:
+                    new_sha = object_hash(fd, b"blob", None)
+                    # if hashes are the same, then the files are actually the same
+                    same = entry.sha == new_sha
+
+                    if not same:
+                        print("  modified: ", entry.name)
+        if entry.name in all_files:
+            all_files.remove(entry.name)
+
+    print()
+    print("Untracked files:")
+
+    # all entries in index have been exhausted
+    # now if there are still files in `all_files` - they are new files on filesystem
+    for f in all_files:
+        # @TODO If a full directory is untracked, we should display its name,
+        # _without_ its contents
+        if not check_ignore(ignore, f):
+            print(" ", f)
+
+
+def cmd_status_branch(repo):
+    branch = branch_get_active(repo)
+    if branch:
+        print(f"On branch {branch}")
+    else:
+        print(f'HEAD detached at {object_find(repo, "HEAD")}')
 
 
 def cmd_log(args):
@@ -773,36 +1148,6 @@ def object_hash(fd, fmt, repo=None) -> str | None:
     return object_write(obj, repo) if obj else None
 
 
-class GitRepository:
-    """A Git Repository"""
-
-    worktree = ""
-    gitdir = ""
-    config = None
-
-    def __init__(self, path, force=False) -> None:
-        self.worktree = path
-        # string path of `.git`
-        self.gitdir: str = os.path.join(path, ".git")
-
-        if not (force or os.path.isdir(self.gitdir)):
-            raise Exception("Not a Git repository: %s" % path)
-
-        # Read configuration file in `.git/config`
-        self.config = configparser.ConfigParser()
-        cf = repo_path_to_file(self, "config")
-
-        if cf and os.path.exists(cf):
-            self.config.read([cf])
-        elif not force:
-            raise Exception("Configuration file missing")
-
-        if not force:
-            vers = int(self.config.get("core", "repositoryformatversion"))
-            if vers != 0:
-                raise Exception("Unsupported repositoryformatversion: %s" % vers)
-
-
 def repo_build_path(repo: GitRepository, *path) -> str:
     """Compute path under repo's gitdir"""
     return os.path.join(repo.gitdir, *path)
@@ -921,6 +1266,206 @@ def repo_find_root(path=".", required=True) -> GitRepository | None:
     return repo_find_root(parent, required)
 
 
+def index_read(repo: GitRepository) -> GitIndex:
+    """
+    A parser to read index files into objects
+    Steps:
+        1. read the 12-byte header
+        2. parse entries in the order they appear
+            - an entry begins with a set of fixed-length data, followed by a variable-length name
+    """
+
+    index_file = repo_path_to_file(repo, "index")
+    if index_file is None:
+        raise Exception("Unable to find the index file!")
+
+    if not os.path.exists(index_file):
+        # new repos have no index
+        return GitIndex()
+
+    with open(index_file, "rb") as f:
+        raw = f.read()
+
+    header = raw[:12]
+    sig = header[:4]
+    assert sig == b"DIRC"  # stands for "DirCache"
+    version = int.from_bytes(header[4:8], "big")
+    assert version == 2, "pit only supports index file version 2"
+    count = int.from_bytes(header[8:12], "big")
+
+    entries = list()
+
+    content = raw[12:]
+    idx = 0
+    for i in range(0, count):
+        # Read creation time, as unix timestamp (epoch)
+        # seconds since 1970-01-01 00:00:00
+        ctime_s = int.from_bytes(content[idx : idx + 4], "big")
+        # Read creation time, as nanoseconds after that timestamp, for extra precision
+        ctime_ns = int.from_bytes(content[idx + 4 : idx + 8], "big")
+        # modification time, seconds after epoch
+        mtime_s = int.from_bytes(content[idx + 8 : idx + 12], "big")
+        # extra nanoseconds
+        mtime_ns = int.from_bytes(content[idx + 12 : idx + 16], "big")
+        # device ID
+        dev = int.from_bytes(content[idx + 16 : idx + 20], "big")
+        # inode
+        inode = int.from_bytes(content[idx + 20 : idx + 24], "big")
+        unused = int.from_bytes(content[idx + 24 : idx + 26], "big")
+        assert 0 == unused
+        mode = int.from_bytes(content[idx + 26 : idx + 28], "big")
+        mode_type = mode >> 12
+        assert mode_type in [0b1000, 0b1010, 0b1110]
+        mode_perms = mode & 0b0000000111111111
+        # User ID
+        uid = int.from_bytes(content[idx + 28 : idx + 32], "big")
+        # group ID
+        gid = int.from_bytes(content[idx + 32 : idx + 36], "big")
+        # size
+        fsize = int.from_bytes(content[idx + 36 : idx + 40], "big")
+        # SHA (object ID) - lowercase hex string
+        sha = format(int.from_bytes(content[idx + 40 : idx + 60], "big"), "040x")
+        flags = int.from_bytes(content[idx + 60 : idx + 62], "big")
+        flag_assume_valid = (flags & 0b1000000000000000) != 0
+        flag_extended = (flags & 0b0100000000000000) != 0
+        assert not flag_extended
+        flag_stage = flags & 0b0011000000000000
+        # length of the name
+        # stored in 12 bits - max value is 0xfff (4095)
+        # names can _occasionally_ go beyond that length
+        # so 0xfff means _at least_ 0xfff - in this case, look for the final 0x00
+        # to find the end of the name
+        name_len = flags & 0b0000111111111111
+
+        # 62 bytes read so far
+        idx += 62
+
+        if name_len < 0xFFF:
+            assert content[idx + name_len] == 0x00
+            raw_name = content[idx : idx + name_len]
+            idx += name_len + 1  # 1 byte to pass 0x00
+        else:
+            print("Notice: name is 0x{:X} bytes long.".format(name_len))
+            null_idx = content.find(b"\x00", idx + 0xFFF)
+            raw_name = content[idx:null_idx]
+            idx = null_idx + 1
+
+        name = raw_name.decode("utf8")
+
+        # data padded on multiples of 8 bytes, for pointer alignment
+        idx = ceil(idx / 8) * 8
+
+        # add this entry to the list
+        entries.append(
+            GitIndexEntry(
+                ctime=(ctime_s, ctime_ns),
+                mtime=(mtime_s, mtime_ns),
+                dev=dev,
+                ino=inode,
+                mode_type=mode_type,
+                mode_perms=mode_perms,
+                uid=uid,
+                gid=gid,
+                fsize=fsize,
+                sha=sha,
+                flag_assume_valid=flag_assume_valid,
+                flag_stage=flag_stage,
+                name=name,
+            )
+        )
+
+    return GitIndex(version=version, entries=entries)
+
+
+def gitignore_read(repo: GitRepository):
+    """
+    Collect all gitignore rules in a repo, and return a `GitIgnore` object
+    """
+    ret = GitIgnore(absolute=list(), scoped=dict())
+
+    # Read local config in `.git/info/exclude`
+    exclude_file = os.path.join(repo.gitdir, "info/exclude")
+    if os.path.exists(exclude_file):
+        with open(exclude_file, "r") as f:
+            ret.absolute.append(gitignore_parse_file(f.readlines()))
+
+    # Global configuration
+    config_home = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+    global_file = os.path.join(config_home, "git/ignore")
+    if os.path.exists(global_file):
+        with open(global_file, "r") as f:
+            ret.absolute.append(gitignore_parse_file(f.readlines()))
+
+    # `.gitignore` files in the index
+    index = index_read(repo)
+    for entry in index.entries:
+        if entry.name == ".gitignore" or entry.name.endswith("/.gitignore"):
+            dir_name = os.path.dirname(entry.name)
+            contents = object_read(repo, entry.sha)
+            if contents is None:
+                raise Exception(f"Unable to read object {entry.sha}!")
+            if not isinstance(contents, GitBlob):
+                raise Exception(f"Invalid object read {entry.sha}!")
+            lines = contents.blobdata.decode("utf8").splitlines()
+            ret.scoped[dir_name] = gitignore_parse_file(lines)
+
+    return ret
+
+
+def check_ignore_line(rules, path) -> bool | None:
+    result = None
+    for pattern, value in rules:
+        # if pattern.endswith("/") and os.path.isdir(path):
+        # path += "/"
+        if fnmatch(path, pattern):
+            result = value
+    return result
+
+
+def check_ignore_scoped(rules, path):
+    """
+    Match against the dictionary of scoped rules (`.gitingore` files).
+    _NEVER_ breaks _inside_ a given `.gitignore` file - because of negations.
+    But as soon as at least one rule  matched in a file, we drop the remaining _files_ (not lines) - a more general file _never_ cancels the effect of a more specific one.
+    """
+    parent = os.path.dirname(path)
+    while True:
+        if parent in rules:
+            result = check_ignore_line(rules[parent], path)
+            if result is not None:
+                return result
+        if parent == "":
+            break
+        parent = os.path.dirname(parent)
+    return None
+
+
+def check_ignore_absolute(rules, path):
+    parent = os.path.dirname(path)
+    for ruleset in rules:
+        result = check_ignore_line(ruleset, path)
+        if result is not None:
+            return result
+    return False
+
+
+def check_ignore(rules, path):
+    """
+    Match a path that's relative to the root of a worktree against a set of rules.
+    Steps:
+        1. first, try to match against the *scoped* rules, from the deepest parent of the path to the farthest, all the way up to `.gitignore` at the root
+        2. if nothing matches, continue with *absolute* rules
+    """
+    if os.path.isabs(path):
+        raise Exception(
+            "This function requires path to be _relative_ to the root of the repository!"
+        )
+    result = check_ignore_scoped(rules.scoped, path)
+    if result is not None:
+        return result
+    return check_ignore_absolute(rules.absolute, path)
+
+
 def kvlm_parse(raw: bytearray, start=0, dict=None) -> collections.OrderedDict:
     """
     Recursively reads key/value pair, then call itself back with the new position.
@@ -1003,8 +1548,8 @@ def libgit(argv=sys.argv[1:]):
         # cmd_add(args)
         case "cat-file":
             cmd_cat_file(args)
-        # case "check-ignore":
-        # cmd_check_ignore(args)
+        case "check-ignore":
+            cmd_check_ignore(args)
         case "checkout":
             cmd_checkout(args)
         # case "commit":
@@ -1015,8 +1560,8 @@ def libgit(argv=sys.argv[1:]):
             cmd_init(args)
         case "log":
             cmd_log(args)
-        # case "ls-files":
-        # cmd_ls_files(args)
+        case "ls-files":
+            cmd_ls_files(args)
         case "ls-tree":
             cmd_ls_tree(args)
         case "rev-parse":
@@ -1025,8 +1570,8 @@ def libgit(argv=sys.argv[1:]):
         # cmd_rm(args)
         case "show-ref":
             cmd_show_ref(args)
-        # case "status":
-        # cmd_status(args)
+        case "status":
+            cmd_status(args)
         case "tag":
             cmd_tag(args)
         case _:
