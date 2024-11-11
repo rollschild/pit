@@ -32,9 +32,6 @@ $ poetry run pit <command>
 - `pit ls-files`
 - `pit check-ignore <paths>`
 - `pit status`
-- `pit rm <paths>`
-- `pit add <paths>`
-- `pit commit`
 
 ## Development Logs
 
@@ -263,23 +260,4 @@ $ poetry run pit <command>
   - compares:
     - the `HEAD` with the staging area
     - the staging area with the worktree
-- `git rm`
-  - removes files from worktree as well as from index
-- `git add`
-  - begin by removing the existing index entry
-    - if there is one, without removing the file itself (`git rm`)
-  - hash the file into a blob object
-  - create its entry
-  - write the modified index back
-- `git add` vs. `git rm`
-  - `git add` needs to create an index entry
-- How to build `git commit`
-  - build a dict (hashmap) of directories
-    - keys are full paths from worktree root (like `pit/libgit.py`)
-    - values are list of `GitIndexEntry` - files in the directory
-  - traverse this list, bottom up
-  - at each directory, build tree with its contents
-  - write new tree to the repo
-  - add the tree to the directory's parent
-  - iterate over the next directory
 -

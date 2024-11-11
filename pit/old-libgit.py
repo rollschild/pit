@@ -125,62 +125,6 @@ check_ignore_args.add_argument("path", nargs="+", help="Paths to check")
 
 status_args = argsubparsers.add_parser("status", help="Show the working tree status.")
 
-rm_args = argsubparsers.add_parser(
-    "rm", help="Remove files from the working tree and from the index."
-)
-rm_args.add_argument("path", nargs="+", help="Files to remove")
-
-add_args = argsubparsers.add_parser("add", help="Add files contents to the index.")
-add_args.add_argument("path", nargs="+", help="Files to add.")
-
-commit_args = argsubparsers.add_parser(
-    "commit", help="Record changes to the repository."
-)
-commit_args.add_argument(
-    "-m",
-    metavar="message",
-    dest="message",
-    help="Message to associate with this commit.",
-)
-
-
-def gitconfig_read():
-    xdg_config_home = os.environ.get("XDG_CONFIG_HOME", "~/.config")
-    config_files = [
-        os.path.expanduser(os.path.join(xdg_config_home, "git/config")),
-        os.path.expanduser("~/.gitconfig"),
-    ]
-    config = configparser.ConfigParser()
-    config.read(config_files)
-    return config
-
-
-def gitconfig_user_get(config) -> str | None:
-    """
-    Read Git's config to get name of the user, which will be used as the author
-    of the committer.
-    """
-
-    if "user" in config:
-        if "name" in config["user"] and "email" in config["user"]:
-            return f'{config["user"]["name"]} <{config["user"]["email"]}>'
-
-    return None
-
-
-def cmd_add(args):
-    repo = repo_find_root()
-    if repo is None:
-        raise Exception("Unable to find repository!")
-    add(repo, args.path)
-
-
-def cmd_rm(args):
-    repo = repo_find_root()
-    if repo is None:
-        raise Exception("Unable to find repository")
-    rm(repo, args.path)
-
 
 def cmd_check_ignore(args):
     """`git check-ignore` handler"""
@@ -514,6 +458,7 @@ class GitTree(GitObject):
     fmt = b"tree"
 
     def init(self):
+        print("init called in %s" % self.__class__.__name__)
         self.items = list()
 
     def serialize(self):
@@ -617,12 +562,8 @@ class GitIndexEntry:
             raise Exception("Invalid argument mtime!")
         self.mtime = mtime
         # ID of device containing this file
-        if type(dev) is not int:
-            raise Exception("Invalid argument dev!")
         self.dev = dev
         # file's inode number
-        if type(ino) is not int:
-            raise Exception("Invalid argument ino!")
         self.ino = ino
         # object type, one of:
         #   - b1000 (regular)
@@ -632,8 +573,6 @@ class GitIndexEntry:
             raise Exception("Invalid argument: mode_type is not an int!")
         self.mode_type: int = int(mode_type)
         # object permissions, an integer
-        if type(mode_perms) is not int:
-            raise Exception("Invalid argument: mode_perms is not an int!")
         self.mode_perms = mode_perms
         # user ID of owner
         if type(uid) is not int:
@@ -644,16 +583,12 @@ class GitIndexEntry:
             raise Exception("Invalid argument: gid")
         self.gid = gid
         # size of the object, in bytes
-        if type(fsize) is not int:
-            raise Exception("Invalid argument: fsize")
         self.fsize = fsize
         # object's SHA
         if type(sha) is not str:
             raise Exception("Invalid argument: sha")
         self.sha = sha
         self.flag_assume_valid = flag_assume_valid
-        if type(flag_stage) is not int:
-            raise Exception("Invalid argument: flag_stage")
         self.flag_stage = flag_stage
         # name of the object, in FULL PATH
         if type(name) is not str:
@@ -672,7 +607,7 @@ class GitIndex:
         - series of optional extensions
     """
 
-    version: int = 2
+    version = None
     entries: list[GitIndexEntry] = []
     # ext = None
     # sha = None
@@ -683,259 +618,6 @@ class GitIndex:
 
         self.version = version
         self.entries = entries
-
-
-def rm(repo: GitRepository, paths: list[str], delete=True, skip_missing=False):
-    """
-    Takes a repo and a list of paths, reads that repo index, and removes entries in the index that match the list.
-    """
-
-    # Find and read the index
-    index = index_read(repo)
-
-    worktree = repo.worktree + os.sep
-
-    # Make paths _absolute_
-    abs_paths = list()
-    for path in paths:
-        abs_path = os.path.abspath(path)
-        if abs_path.startswith(worktree):
-            abs_paths.append(abs_path)
-        else:
-            raise Exception(f"Cannot remove paths outside of worktree: {path}")
-
-    kept_entries = list()
-    remove = list()
-
-    for entry in index.entries:
-        full_path = os.path.join(repo.worktree, entry.name)
-        if full_path in abs_paths:
-            remove.append(full_path)
-            abs_paths.remove(full_path)
-        else:
-            kept_entries.append(entry)  # preserve the entry
-
-    if len(abs_paths) > 0 and not skip_missing:
-        raise Exception(f"Unable to remove paths not in the index: {abs_paths}")
-
-    if delete:
-        for path in remove:
-            # os.unlink - remove (delete) the file path
-            os.unlink(path)
-
-    index.entries = kept_entries
-    index_write(repo, index)
-
-
-def add(repo: GitRepository, paths: list[str], delete=True, skip_missing=False):
-    """
-    `pit add <paths>`
-    """
-    # First, remove all paths from index, if they exist
-    rm(repo, paths, delete=False, skip_missing=True)
-
-    worktree = repo.worktree + os.sep
-
-    # Convert paths to pairs: (absolute, relative_to_worktree)
-    # Also delete them from index if they are present
-    clean_paths = list()
-    for path in paths:
-        abs_path = os.path.abspath(path)
-        if not (abs_path.startswith(worktree) and os.path.isfile(abs_path)):
-            raise Exception(f"Not a file or outside of worktree: {abs_path}")
-        rel_path = os.path.relpath(abs_path, repo.worktree)
-        clean_paths.append((abs_path, rel_path))
-
-        # Find and read the index
-        index = index_read(repo)
-        for abs_path, rel_path in clean_paths:
-            with open(abs_path, "rb") as fd:
-                sha = object_hash(fd, b"blob", repo)
-
-            stat = os.stat(abs_path)
-            ctime_s = int(stat.st_ctime)
-            ctime_ns = stat.st_ctime_ns % 10**9
-            mtime_s = int(stat.st_mtime)
-            mtime_ns = stat.st_mtime_ns % 10**9
-
-            entry = GitIndexEntry(
-                ctime=(ctime_s, ctime_ns),
-                mtime=(mtime_s, mtime_ns),
-                dev=stat.st_dev,
-                ino=stat.st_ino,
-                mode_type=0b1000,
-                mode_perms=0o644,
-                uid=stat.st_uid,
-                gid=stat.st_gid,
-                fsize=stat.st_size,
-                sha=sha,
-                flag_assume_valid=0,
-                flag_stage=0,
-                name=rel_path,
-            )
-
-            index.entries.append(entry)
-
-        index_write(repo, index)
-
-
-def tree_from_index(repo: GitRepository, index: GitIndex) -> str | None:
-    """
-    Unflatten the index into a tree. Return root tree's SHA-1
-    """
-    # keys are full paths from worktree root
-    # values are list of `GitIndexEntry` - files in the directory
-    contents = dict()
-    contents[""] = list()
-
-    # Enumerate entries, and turn them into a dictionary where keys are directories,
-    # and values are lists of directory contents
-    for entry in index.entries:
-        # notice this is the name of the *directory*, _NOT_ the file
-        dir_name = os.path.dirname(entry.name)
-
-        # Create all dictionary entries up to root ("").
-        # We need *all*, because even if a directory holds no files it will contain at least a tree
-        key = dir_name
-        while key != "":
-            if not key in contents:
-                # keys of `contents` are directories
-                contents[key] = list()
-
-            # bottom up, from deepest dir to the outmost dir
-            # basically insert all directories into `contents`, making them keys of lists
-            key = os.path.dirname(key)
-
-        contents[dir_name].append(entry)
-
-    # Get keys and sort them by length, descending.
-    sorted_paths = sorted(contents.keys(), key=len, reverse=True)
-
-    # current tree's SHA-1
-    # after full iteration it will contain the hash of the root tree
-    sha = None
-
-    # from the longest/deepest directory to root
-    for path in sorted_paths:
-        # prepare a new, empty tree object
-        tree = GitTree()
-
-        # add each entry to the new tree, in turn
-        for entry in contents[path]:
-            # entry can be:
-            #   - GitIndexEntry (read from the index), or
-            #   - GitTreeNode (created by us)
-            if isinstance(entry, GitIndexEntry):
-                # regular entry (a file)
-                # octal ASCII representation for the tree
-                node_mode = "{:02o}{:04o}".format(
-                    entry.mode_type, entry.mode_perms
-                ).encode("ascii")
-                node = GitTreeNode(
-                    filemode=node_mode, path=os.path.basename(entry.name), sha=entry.sha
-                )
-            else:
-                # tree
-                # stored as a pair (basename, SHA)
-                node = GitTreeNode(filemode=b"040000", path=entry[0], sha=entry[1])
-
-            tree.items.append(node)
-
-        # write the new tree object to the store
-        sha = object_write(tree, repo)
-
-        # Add the new tree hash to the current dictionary's parent, as a pair (basename, SHA)
-        parent = os.path.dirname(path)
-        base = os.path.basename(path)
-        contents[parent].append((base, sha))
-
-    return sha
-
-
-def commit_create(
-    repo: GitRepository,
-    tree_sha: str,
-    parent_sha: str,
-    author: str,
-    timestamp: datetime,
-    message: str,
-):
-    """
-    Create a commit object.
-    """
-
-    commit = GitCommit()
-    commit.kvlm[b"tree"] = tree_sha.encode("ascii")
-    if parent_sha:
-        commit.kvlm[b"parent"] = parent_sha.encode("ascii")
-
-    # format timezone
-    tz_offset = timestamp.astimezone().utcoffset()
-    if tz_offset is None:
-        raise Exception("Invalid timestamp provided!")
-    offset = int(tz_offset.total_seconds())
-    hours = offset // 3600  # floor
-    minutes = (offset % 3600) // 60
-    # account for the negativity of hours (or offset)
-    # if a minus sign already prepended, we need to take the absolute value of `hours`
-    # otherwise we will see something like `--500` as `tz`
-    tz = "{}{:02}{:02}".format(
-        "+" if offset > 0 else "-", hours if offset > 0 else abs(hours), minutes
-    )
-
-    author = author + timestamp.strftime(" %s ") + tz
-
-    commit.kvlm[b"author"] = author.encode("utf8")
-    commit.kvlm[b"committer"] = author.encode("utf8")
-    commit.kvlm[None] = message.encode("utf8")
-
-    return object_write(commit, repo)
-
-
-def cmd_commit(args):
-    """`pit commit` handler"""
-    repo = repo_find_root()
-    if repo is None:
-        raise Exception("Unable to find a repository!")
-
-    index = index_read(repo)
-    # create trees, grab back SHA for the root tree
-    tree_sha = tree_from_index(repo, index)
-    if tree_sha is None:
-        raise Exception("Unable to read index of the repository!")
-
-    parent_sha = object_find(repo, "HEAD")
-    if parent_sha is None:
-        raise Exception("Unable to read index of the repository!")
-
-    # create commit object itself
-    commit = commit_create(
-        repo,
-        tree_sha,
-        parent_sha,
-        gitconfig_user_get(gitconfig_read()) or "Unknown",
-        datetime.now(),
-        args.message,
-    )
-
-    # Update HEAD so the commit is now the tip of the active branch
-    active_brach = branch_get_active(repo)
-    if active_brach:
-        # if on a branch, update refs/heads/<branch>
-        # there is a single line of commit sha in there
-        path_to_active_branch = repo_path_to_file(
-            repo, os.path.join("refs/heads", active_brach)
-        )
-        if path_to_active_branch is None:
-            raise Exception("Unable to find path to active branch!")
-        with open(path_to_active_branch, "w") as fd:
-            fd.write(commit + "\n")
-    else:
-        path_to_head = repo_path_to_file(repo, "HEAD")
-        if path_to_head is None:
-            raise Exception("Unable to find path to HEAD!")
-        with open(path_to_head, "w") as fd:
-            fd.write("\n")
 
 
 def cmd_status(_):
@@ -1399,7 +1081,7 @@ def object_resolve(repo, name: str) -> list[str] | None:
 
 def object_find(repo, name: str, fmt=None, follow=True) -> str | None:
     """
-    Name resolution function to find an object and return its sha
+    Name resolution function to find an object.
     """
     sha = object_resolve(repo, name)
 
@@ -1695,64 +1377,6 @@ def index_read(repo: GitRepository) -> GitIndex:
     return GitIndex(version=version, entries=entries)
 
 
-def index_write(repo: GitRepository, index: GitIndex):
-    index_file_path = repo_path_to_file(repo, "index")
-    if index_file_path is None:
-        raise Exception("Unable to find the index file!")
-
-    with open(index_file_path, "wb") as f:
-        # HEADER
-
-        ## write the magic bytes
-        f.write(b"DIRC")
-        ## write version number (type: int)
-        f.write(index.version.to_bytes(4, "big"))
-        ## write number of entries
-        f.write(len(index.entries).to_bytes(4, "big"))
-
-        # ENTRIES
-        idx = 0
-        for entry in index.entries:
-            f.write(entry.ctime[0].to_bytes(4, "big"))
-            f.write(entry.ctime[1].to_bytes(4, "big"))
-            f.write(entry.mtime[0].to_bytes(4, "big"))
-            f.write(entry.mtime[1].to_bytes(4, "big"))
-            f.write(entry.dev.to_bytes(4, "big"))
-            f.write(entry.ino.to_bytes(4, "big"))
-
-            ## mode
-            mode = (entry.mode_type << 12) | entry.mode_perms
-            f.write(mode.to_bytes(4, "big"))
-
-            f.write(entry.uid.to_bytes(4, "big"))
-            f.write(entry.gid.to_bytes(4, "big"))
-
-            f.write(entry.fsize.to_bytes(4, "big"))
-            f.write(int(entry.sha, 16).to_bytes(20, "big"))
-
-            flag_assume_valid = 0x1 << 15 if entry.flag_assume_valid else 0
-
-            name_bytes = entry.name.encode("utf8")
-            bytes_len = len(name_bytes)
-            name_len = 0xFFF if bytes_len >= 0xFFF else bytes_len
-
-            f.write(
-                (flag_assume_valid | entry.flag_stage | name_len).to_bytes(2, "big")
-            )
-
-            ## write back the name, and a final 0x00
-            f.write(name_bytes)
-            f.write((0).to_bytes(1, "big"))
-
-            idx += 62 + len(name_bytes) + 1
-
-            # Add padding if necessary
-            if idx % 8 != 0:
-                pad = 8 - (idx % 8)
-                f.write((0).to_bytes(pad, "big"))
-                idx += pad
-
-
 def gitignore_read(repo: GitRepository):
     """
     Collect all gitignore rules in a repo, and return a `GitIgnore` object
@@ -1920,16 +1544,16 @@ def kvlm_serialize(kvlm: collections.OrderedDict) -> bytearray:
 def libgit(argv=sys.argv[1:]):
     args = argparser.parse_args(argv)
     match args.command:
-        case "add":
-            cmd_add(args)
+        # case "add":
+        # cmd_add(args)
         case "cat-file":
             cmd_cat_file(args)
         case "check-ignore":
             cmd_check_ignore(args)
         case "checkout":
             cmd_checkout(args)
-        case "commit":
-            cmd_commit(args)
+        # case "commit":
+        # cmd_commit(args)
         case "hash-object":
             cmd_hash_object(args)
         case "init":
@@ -1942,8 +1566,8 @@ def libgit(argv=sys.argv[1:]):
             cmd_ls_tree(args)
         case "rev-parse":
             cmd_rev_parse(args)
-        case "rm":
-            cmd_rm(args)
+        # case "rm":
+        # cmd_rm(args)
         case "show-ref":
             cmd_show_ref(args)
         case "status":
