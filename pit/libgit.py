@@ -14,7 +14,7 @@ from math import ceil
 import os
 import re
 import sys
-from typing import List
+from typing import IO, List
 import zlib
 
 
@@ -23,6 +23,41 @@ INDEX_FILE_MODE_DICT: dict[int, str] = {
     0b1010: "symlink",
     0b1110: "git link",
 }
+
+
+class Lock:
+    """Lock mechanism to prevent concurrent writes to a file."""
+
+    def __init__(self, path: str) -> None:
+        self.file_path = path
+        self.lock_path = os.path.join(path, ".lock")
+        self.lock: IO | None = None
+
+    def lock_hold_for_update(self) -> bool:
+        """
+        Let caller attempt to acquire the lock for writing to the file.
+        The first process to call this method will create the `.lock` file, and any
+        other process that tries to acquire the lock while that file still exists will fail to do so.
+        """
+
+        if self.lock is not None:
+            return False
+
+        self.lock = open(self.lock_path, "x+")
+        return True
+
+    def lock_write(self, data: str):
+        if self.lock is None:
+            raise Exception(f"Unable to hold lock on file {self.lock_path}!")
+        self.lock.write(data)
+
+    def lock_commit_changes(self):
+        if self.lock is None:
+            raise Exception(f"Unable to hold lock on file {self.lock_path}!")
+
+        self.lock.close()
+        os.rename(self.lock_path, self.file_path)
+        self.lock = None
 
 
 class GitIgnore:
@@ -104,6 +139,7 @@ class GitTree(GitObject):
     def init(self):
         self.items = list()
 
+    # to string
     def serialize(self):
         return tree_serialize(self)
 
@@ -852,7 +888,7 @@ def object_write(obj: GitBlob | GitCommit | GitTree, repo=None) -> str:
         4. write result in the correct location
     """
 
-    # serialize object data
+    # serialize object data - to string
     data = obj.serialize()
 
     # add header
@@ -1722,6 +1758,19 @@ def cmd_commit(args):
             raise Exception("Unable to find path to HEAD!")
         with open(path_to_head, "w") as fd:
             fd.write("\n")
+
+
+# TODO
+def head_update(path: str, data: str | None):
+    lockfile = Lock(path)
+
+    if not lockfile.lock_hold_for_update():
+        raise Exception(f"Unable to acquire lock on file: {path}")
+
+    if data is not None:
+        lockfile.lock_write(data)
+    lockfile.lock_write("\n")
+    lockfile.lock_commit_changes()
 
 
 def cmd_status(_):
