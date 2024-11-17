@@ -30,7 +30,7 @@ class Lock:
 
     def __init__(self, path: str) -> None:
         self.file_path = path
-        self.lock_path = os.path.join(path, ".lock")
+        self.lock_path = path + ".lock"
         self.lock: IO | None = None
 
     def lock_hold_for_update(self) -> bool:
