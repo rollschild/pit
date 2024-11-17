@@ -104,6 +104,8 @@ $ poetry run pit <command>
     - **blob**
   - `<filemode> blob <blob-id> <blob-name>`
 - `git cat-file -p <blob-id>`
+- `git cat-file -p HEAD^{tree}`
+  - Ask Git for the tree of the commit referenced by `.git/HEAD`
 
 ### Storing Objects
 
@@ -173,6 +175,7 @@ $ poetry run pit <command>
   - SHA-1
     - referring to either a blob or another tree object
 - tree object format: `<filemode> <path><null_byte><sha>`
+  - file mode is stored in Git in octal format
 - `git ls-tree [-r] <tree-id>`
   - prints contents of a tree, recursively if `-r` is set
 - `git checkout`

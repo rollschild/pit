@@ -56,7 +56,8 @@ class Lock:
             raise Exception(f"Unable to hold lock on file {self.lock_path}!")
 
         self.lock.close()
-        os.rename(self.lock_path, self.file_path)
+        # silently replace dst if dst already exists (and user has permission)
+        os.replace(self.lock_path, self.file_path)
         self.lock = None
 
 
@@ -1116,8 +1117,7 @@ def repo_create(path: str):
 
     # `.git/HEAD`
     if ptf := repo_path_to_file(repo, "HEAD"):
-        with open(ptf, "w") as f:
-            f.write("ref: refs/heads/main\n")
+        head_update(ptf, "ref: refs/heads/main\n")
 
     # `.git/config`
     if ptf := repo_path_to_file(repo, "config"):
@@ -1648,11 +1648,9 @@ def cmd_ls_files(args):
         if args.verbose:
             # `:o` - octal
             print(
-                "    {} with perms: {:o}".format(
-                    INDEX_FILE_MODE_DICT[entry.mode_type], entry.mode_perms
-                )
+                f"    {INDEX_FILE_MODE_DICT[entry.mode_type]} with perms: {entry.mode_perms:o}"
             )
-            print("    on blob: {}".format(entry.sha))
+            print(f"    on blob: {entry.sha}")
             print(
                 "    created: {}.{}, modified: {}.{}".format(
                     datetime.fromtimestamp(entry.ctime[0]),
@@ -1661,7 +1659,7 @@ def cmd_ls_files(args):
                     entry.mtime[1],
                 )
             )
-            print("    device: {}, inode: {}".format(entry.dev, entry.ino))
+            print(f"    device: {entry.dev}, inode: {entry.ino}")
             print(
                 "    user: {} ({}) group: {} ({})".format(
                     pwd.getpwuid(entry.uid).pw_name,
@@ -1671,9 +1669,7 @@ def cmd_ls_files(args):
                 )
             )
             print(
-                "    flags: stage={} assume_valid={}".format(
-                    entry.flag_stage, entry.flag_assume_valid
-                )
+                f"    flags: stage={entry.flag_stage} assume_valid={entry.flag_assume_valid}"
             )
 
 
@@ -1756,20 +1752,18 @@ def cmd_commit(args):
         path_to_head = repo_path_to_file(repo, "HEAD")
         if path_to_head is None:
             raise Exception("Unable to find path to HEAD!")
-        with open(path_to_head, "w") as fd:
-            fd.write("\n")
+
+        head_update(path_to_head, commit + "\n")
 
 
-# TODO
-def head_update(path: str, data: str | None):
+def head_update(path: str, data: str):
     lockfile = Lock(path)
 
     if not lockfile.lock_hold_for_update():
         raise Exception(f"Unable to acquire lock on file: {path}")
 
-    if data is not None:
-        lockfile.lock_write(data)
-    lockfile.lock_write("\n")
+    lockfile.lock_write(data)
+    # lockfile.lock_write("\n")
     lockfile.lock_commit_changes()
 
 
@@ -1911,8 +1905,7 @@ def cmd_checkout(args):
         if not content:
             raise Exception(f"Unable to checkout {args.commit_id}")
         if head_file := repo_path_to_file(repo, "HEAD"):
-            with open(head_file, "w") as f:
-                f.write(content + "\n")
+            head_update(head_file, content + "\n")
 
         return
 
