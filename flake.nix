@@ -39,7 +39,7 @@
               (mkPoetryEnv { projectDir = self; })
               poetry
               ruff
-              ruff-lsp
+              # ruff-lsp
             ];
             shellHook =
               let

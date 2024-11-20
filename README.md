@@ -285,4 +285,10 @@ $ poetry run pit <command>
   - write new tree to the repo
   - add the tree to the directory's parent
   - iterate over the next directory
+
+### The Myers Diff Algorithm
+
+- being greedy
+- finding the **Shortest Edit Script (SES)**
+- finding the **Longest Common Subsequence**
 -
