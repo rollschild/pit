@@ -6,7 +6,9 @@ from abc import ABC, abstractmethod
 import argparse
 import collections
 import configparser
+from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 import grp, pwd
 from fnmatch import fnmatch
 import hashlib
@@ -14,7 +16,7 @@ from math import ceil
 import os
 import re
 import sys
-from typing import IO, List
+from typing import IO, List, OrderedDict
 import zlib
 
 
@@ -125,6 +127,10 @@ class GitObject(ABC):
 
     def init(self):
         pass
+
+
+class DiffStatus(Enum):
+    MODIFIED = "modified"
 
 
 class GitTreeNode:
@@ -242,7 +248,8 @@ class GitIndexEntry:
         if type(flag_stage) is not int:
             raise Exception("Invalid argument: flag_stage")
         self.flag_stage = flag_stage
-        # name of the object, in FULL PATH
+        # name of the object, in FULL PATH, relative to the root of repo
+        # e.g. `pit/main.py`
         if type(name) is not str:
             raise Exception("Invalid argument: name")
         self.name = name
@@ -270,6 +277,114 @@ class GitIndex:
 
         self.version = version
         self.entries = entries
+
+
+@dataclass
+class GitStatus:
+    repo: GitRepository
+    changed: list
+    head_index_changes: list  # changes staged for commit
+
+    # dict of {path: state}
+    index_worktree_changes: OrderedDict[str, DiffStatus]
+
+    untracked_files: list
+
+    index: GitIndex
+
+    def __init__(self, repo: GitRepository) -> None:
+        self.repo = repo
+        self.changed = []
+        self.head_index_changes = []
+        self.index_worktree_changes = OrderedDict()
+        self.untracked_files = []
+
+        self.index = index_read(self.repo)
+
+        self.status_head_index()
+        self.status_index_worktree()
+
+    def status_head_index(self):
+        """
+        Changes to be committed.
+        """
+        head = tree_to_dict(self.repo, "HEAD")
+        for entry in self.index.entries:
+            if entry.name in head:
+                if head[entry.name] != entry.sha:
+                    pass
+                    # self.index_worktree_changes[entry.name] = DiffStatus.MODIFIED
+                del head[entry.name]  # delete the key
+            else:
+                print("  added:    ", entry.name)
+
+        # keys still in HEAD are files that we have _not_ met in the index
+        # these files have been deleted
+        for entry in head.keys():
+            print("  deleted: ", entry)
+
+    def status_index_worktree(self):
+        """
+        Changes not staged for commit.
+        Find changes between index and worktree.
+        """
+
+        ignore = gitignore_read(self.repo)
+
+        # `os.path.sep`: character seperating path components on a particular OS
+        gitdir_prefix = self.repo.gitdir + os.path.sep
+        all_files = list()
+
+        # begin by walking the filesystem, get all files in there
+        # top-down by default
+        # `os.walk` returns:
+        #   - dirpath
+        #   - dirnames
+        #   - filenames
+        for root, _, files in os.walk(self.repo.worktree, True):
+            if root == self.repo.gitdir or root.startswith(gitdir_prefix):
+                continue
+            for f in files:
+                full_path = os.path.join(root, f)
+                rel_path = os.path.relpath(full_path, self.repo.worktree)
+                all_files.append(rel_path)
+
+        # Now traverse the index, and compare real files with the cached versions
+        for entry in self.index.entries:
+            full_path = os.path.join(self.repo.worktree, entry.name)
+            if not os.path.exists(full_path):
+                # file in index but _not_ in filesystem - it's deleted
+                print("  deleted: ", entry.name)
+            else:
+                stat = os.stat(full_path)
+
+                # Compare metadata
+                ctime_ns = entry.ctime[0] * 10**9 + entry.ctime[1]
+                mtime_ns = entry.mtime[0] * 10**9 + entry.mtime[1]
+                if (stat.st_ctime_ns != ctime_ns) or (stat.st_mtime_ns != mtime_ns):
+                    # If different, deep compare
+                    # @FIXME - this **will** crash on symlinks to dir
+                    with open(full_path, "rb") as fd:
+                        new_sha = object_hash(fd, b"blob", None)
+                        # if hashes are the same, then the files are actually the same
+                        same = entry.sha == new_sha
+
+                        if not same:
+                            self.index_worktree_changes[entry.name] = (
+                                DiffStatus.MODIFIED
+                            )
+            if entry.name in all_files:
+                all_files.remove(entry.name)
+
+        # Untracked files
+
+        # all entries in index have been exhausted
+        # now if there are still files in `all_files` - they are new files on filesystem
+        for f in all_files:
+            # @TODO If a full directory is untracked, we should display its name,
+            # _without_ its contents
+            if not check_ignore(ignore, f):
+                print(" ", f)
 
 
 def gitconfig_read():
@@ -1319,6 +1434,17 @@ def index_write(repo: GitRepository, index: GitIndex):
                 idx += pad
 
 
+def index_find_entry_from_path(index: GitIndex, path: str) -> GitIndexEntry | None:
+    """
+    Find and return GitIndexEntry based on its path/name
+    """
+    for entry in index.entries:
+        if entry.name == path:
+            return entry
+
+    return None
+
+
 def gitignore_read(repo: GitRepository):
     """
     Collect all gitignore rules in a repo, and return a `GitIgnore` object
@@ -1596,6 +1722,8 @@ rm_args.add_argument("path", nargs="+", help="Files to remove")
 add_args = argsubparsers.add_parser("add", help="Add files contents to the index.")
 add_args.add_argument("path", nargs="+", help="Files to add.")
 
+diff_args = argsubparsers.add_parser("diff", help="Display diffs of files.")
+
 commit_args = argsubparsers.add_parser(
     "commit", help="Record changes to the repository."
 )
@@ -1605,6 +1733,59 @@ commit_args.add_argument(
     dest="message",
     help="Message to associate with this commit.",
 )
+
+
+def short_sha(sha: str) -> str:
+    return sha[0:6]
+
+
+def diff_file_modified(repo: GitRepository, path: str):
+    index = index_read(repo)
+    entry = index_find_entry_from_path(index, path)
+    if entry is None:
+        raise Exception(f"Unable to find the entry for path {path}!")
+
+    # when running `git diff`, it displays the diff of the file objects first,
+    # e.g. `index 182dce2..5b09b2b 100644`
+    # these two hexadecimal numbers are the object ID stored in the index and
+    # the hash of the current file respectively
+
+    a_sha = entry.sha
+    a_mode = entry.mode_type
+    a_perms = entry.mode_perms
+    node_mode = "{:02o}{:04o}".format(a_mode, a_perms)
+    a_path = "a" if path.startswith("/") else "a/" + path
+
+    # repo.worktree example: `/home/rollschild/projects/pit`
+    # entry.name example: `pit/libgit.py`
+    # `os.path.join` automatically adds `/` in between
+    full_path = os.path.join(repo.worktree, entry.name)
+    with open(full_path, "rb") as fd:
+        b_sha = object_hash(fd, b"blob", None)
+    if b_sha is None:
+        raise Exception(f"Unable to hash the file {path}!")
+    b_path = "b" if path.startswith("/") else "b/" + path
+
+    print(f"diff --git {a_path} {b_path}")
+    print(f"index {short_sha(a_sha)}..{short_sha(b_sha)} {node_mode}")
+    print(f"--- {a_path}")
+    print(f"+++ {b_path}")
+
+
+def cmd_diff(args):
+    repo = repo_find_root()
+    if repo is None:
+        raise Exception("Unable to find repository!")
+
+    status = GitStatus(repo)
+
+    # TODO
+    for path, state in status.index_worktree_changes.items():
+        match state:
+            case DiffStatus.MODIFIED:
+                diff_file_modified(repo, path)
+            case _:
+                raise Exception("Unable to display diff for unknown type!")
 
 
 def cmd_add(args):
@@ -1990,5 +2171,7 @@ def libgit(argv=sys.argv[1:]):
             cmd_status(args)
         case "tag":
             cmd_tag(args)
+        case "diff":
+            cmd_diff(args)
         case _:
             print("Invalid command!")

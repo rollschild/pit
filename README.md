@@ -35,6 +35,7 @@ $ poetry run pit <command>
 - `pit rm <paths>`
 - `pit add <paths>`
 - `pit commit -m <message>`
+- `pit diff`
 
 ## Development Logs
 
