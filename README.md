@@ -292,4 +292,21 @@ $ poetry run pit <command>
 - being greedy
 - finding the **Shortest Edit Script (SES)**
 - finding the **Longest Common Subsequence**
+- when `git rm` a file, the `git diff` shows:
+  ```console
+  diff --git a/some_file b/some_file
+  deleted file mode 100644
+  index <hash>...0000000
+  --- a/some_file
+  +++ /dev/null
+  ```
+- if file mode has been changed,
+  ```console
+  diff --git a/some_file b/some_file
+  old mode 100644
+  new mode 100755
+  ```
+- screenshot of progress so far: diff with headers _only_
+  ![pit diff](./assets/pit_diff_headers_only.png)
+
 -

@@ -26,6 +26,9 @@ INDEX_FILE_MODE_DICT: dict[int, str] = {
     0b1110: "git link",
 }
 
+NULL_SHA = "0" * 40
+NULL_PATH = "/dev/null"
+
 
 class Lock:
     """Lock mechanism to prevent concurrent writes to a file."""
@@ -131,6 +134,7 @@ class GitObject(ABC):
 
 class DiffStatus(Enum):
     MODIFIED = "modified"
+    DELETED = "deleted"
 
 
 class GitTreeNode:
@@ -282,6 +286,7 @@ class GitIndex:
 @dataclass
 class GitStatus:
     repo: GitRepository
+    stats: dict[str, os.stat_result]
     changed: list
     head_index_changes: list  # changes staged for commit
 
@@ -294,6 +299,7 @@ class GitStatus:
 
     def __init__(self, repo: GitRepository) -> None:
         self.repo = repo
+        self.stats = {}
         self.changed = []
         self.head_index_changes = []
         self.index_worktree_changes = OrderedDict()
@@ -349,12 +355,15 @@ class GitStatus:
                 rel_path = os.path.relpath(full_path, self.repo.worktree)
                 all_files.append(rel_path)
 
+                # get file stats and store them
+                self.stats[rel_path] = os.stat(full_path)
+
         # Now traverse the index, and compare real files with the cached versions
         for entry in self.index.entries:
             full_path = os.path.join(self.repo.worktree, entry.name)
             if not os.path.exists(full_path):
                 # file in index but _not_ in filesystem - it's deleted
-                print("  deleted: ", entry.name)
+                self.index_worktree_changes[entry.name] = DiffStatus.DELETED
             else:
                 stat = os.stat(full_path)
 
@@ -1736,10 +1745,14 @@ commit_args.add_argument(
 
 
 def short_sha(sha: str) -> str:
-    return sha[0:6]
+    return sha[0:7]
 
 
-def diff_file_modified(repo: GitRepository, path: str):
+def diff_print():
+    pass
+
+
+def diff_file_modified(repo: GitRepository, status: GitStatus, path: str):
     index = index_read(repo)
     entry = index_find_entry_from_path(index, path)
     if entry is None:
@@ -1751,9 +1764,9 @@ def diff_file_modified(repo: GitRepository, path: str):
     # the hash of the current file respectively
 
     a_sha = entry.sha
-    a_mode = entry.mode_type
+    a_mode_type = entry.mode_type
     a_perms = entry.mode_perms
-    node_mode = "{:02o}{:04o}".format(a_mode, a_perms)
+    a_mode = "{:02o}{:04o}".format(a_mode_type, a_perms)
     a_path = "a" if path.startswith("/") else "a/" + path
 
     # repo.worktree example: `/home/rollschild/projects/pit`
@@ -1764,12 +1777,48 @@ def diff_file_modified(repo: GitRepository, path: str):
         b_sha = object_hash(fd, b"blob", None)
     if b_sha is None:
         raise Exception(f"Unable to hash the file {path}!")
+    b_mode = "{:o}".format(status.stats.get(entry.name, {"st_mode": 33188}).st_mode)
     b_path = "b" if path.startswith("/") else "b/" + path
 
     print(f"diff --git {a_path} {b_path}")
-    print(f"index {short_sha(a_sha)}..{short_sha(b_sha)} {node_mode}")
+
+    # compare file modes and display if different
+    if a_mode != b_mode:
+        print(f"old mode {a_mode}")
+        print(f"new mode {b_mode}")
+
+    if a_sha == b_sha:
+        return
+
+    sha_range = f"index {short_sha(a_sha)}..{short_sha(b_sha)}"
+    if a_mode == b_mode:
+        sha_range += f" {a_mode}"
+
+    print(sha_range)
     print(f"--- {a_path}")
     print(f"+++ {b_path}")
+
+
+def diff_file_deleted(repo: GitRepository, path: str):
+    index = index_read(repo)
+    entry = index_find_entry_from_path(index, path)
+    if entry is None:
+        raise Exception(f"Unable to find the entry for path {path}!")
+
+    a_sha = entry.sha
+    a_mode = entry.mode_type
+    a_perms = entry.mode_perms
+    node_mode = "{:02o}{:04o}".format(a_mode, a_perms)
+    a_path = "a" if path.startswith("/") else "a/" + path
+
+    b_sha = NULL_SHA
+    b_path = "b" if path.startswith("/") else "b/" + path
+
+    print(f"diff --git {a_path} {b_path}")
+    print(f"deleted file mode {node_mode}")
+    print(f"index {short_sha(a_sha)}..{short_sha(b_sha)}")
+    print(f"--- {a_path}")
+    print(f"+++ {NULL_PATH}")
 
 
 def cmd_diff(args):
@@ -1783,7 +1832,9 @@ def cmd_diff(args):
     for path, state in status.index_worktree_changes.items():
         match state:
             case DiffStatus.MODIFIED:
-                diff_file_modified(repo, path)
+                diff_file_modified(repo, status, path)
+            case DiffStatus.DELETED:
+                diff_file_deleted(repo, path)
             case _:
                 raise Exception("Unable to display diff for unknown type!")
 
