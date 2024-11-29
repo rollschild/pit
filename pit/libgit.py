@@ -19,6 +19,8 @@ import sys
 from typing import IO, List, OrderedDict
 import zlib
 
+from pit.libdiff import DiffTarget
+
 
 INDEX_FILE_MODE_DICT: dict[int, str] = {
     0b1000: "regular file",
@@ -27,7 +29,6 @@ INDEX_FILE_MODE_DICT: dict[int, str] = {
 }
 
 NULL_SHA = "0" * 40
-NULL_PATH = "/dev/null"
 
 
 class Lock:
@@ -1748,7 +1749,50 @@ def short_sha(sha: str) -> str:
     return sha[0:7]
 
 
-def diff_print():
+def diff_print_mode(a: DiffTarget, b: DiffTarget):
+    if b.mode is None:
+        print(f"deleted file mode {a.mode}")
+    elif a.mode != b.mode:
+        # compare file modes and display if different
+        print(f"old mode {a.mode}")
+        print(f"new mode {b.mode}")
+
+
+def diff_print_content(a: DiffTarget, b: DiffTarget):
+    if a.sha == b.sha:
+        return
+
+    sha_range = f"index {short_sha(a.sha)}..{short_sha(b.sha)}"
+    if a.mode == b.mode:
+        sha_range += f" {a.mode}"
+
+    print(sha_range)
+    print(f"--- {a.diff_path()}")
+    print(f"+++ {b.diff_path()}")
+
+
+def diff_print(a: DiffTarget, b: DiffTarget):
+    if a.sha == b.sha and a.mode == b.mode:
+        return
+
+    a.set_path("a" if a.path.startswith("/") else "a/" + a.path)
+    b.set_path("b" if b.path.startswith("/") else "b/" + b.path)
+
+    print(f"diff --git {a.path} {b.path}")
+
+    diff_print_mode(a, b)
+    diff_print_content(a, b)
+
+
+def difftarget_from_index(path: str) -> DiffTarget:
+    pass
+
+
+def difftarget_from_file(path: str) -> DiffTarget:
+    pass
+
+
+def difftarget_from_nothing(path: str) -> DiffTarget:
     pass
 
 
@@ -1767,7 +1811,6 @@ def diff_file_modified(repo: GitRepository, status: GitStatus, path: str):
     a_mode_type = entry.mode_type
     a_perms = entry.mode_perms
     a_mode = "{:02o}{:04o}".format(a_mode_type, a_perms)
-    a_path = "a" if path.startswith("/") else "a/" + path
 
     # repo.worktree example: `/home/rollschild/projects/pit`
     # entry.name example: `pit/libgit.py`
@@ -1778,25 +1821,11 @@ def diff_file_modified(repo: GitRepository, status: GitStatus, path: str):
     if b_sha is None:
         raise Exception(f"Unable to hash the file {path}!")
     b_mode = "{:o}".format(status.stats.get(entry.name, {"st_mode": 33188}).st_mode)
-    b_path = "b" if path.startswith("/") else "b/" + path
 
-    print(f"diff --git {a_path} {b_path}")
+    a = DiffTarget(path=path, sha=a_sha, mode=a_mode)
+    b = DiffTarget(path=path, sha=b_sha, mode=b_mode)
 
-    # compare file modes and display if different
-    if a_mode != b_mode:
-        print(f"old mode {a_mode}")
-        print(f"new mode {b_mode}")
-
-    if a_sha == b_sha:
-        return
-
-    sha_range = f"index {short_sha(a_sha)}..{short_sha(b_sha)}"
-    if a_mode == b_mode:
-        sha_range += f" {a_mode}"
-
-    print(sha_range)
-    print(f"--- {a_path}")
-    print(f"+++ {b_path}")
+    diff_print(a, b)
 
 
 def diff_file_deleted(repo: GitRepository, path: str):
@@ -1806,19 +1835,14 @@ def diff_file_deleted(repo: GitRepository, path: str):
         raise Exception(f"Unable to find the entry for path {path}!")
 
     a_sha = entry.sha
-    a_mode = entry.mode_type
+    a_mode_type = entry.mode_type
     a_perms = entry.mode_perms
-    node_mode = "{:02o}{:04o}".format(a_mode, a_perms)
-    a_path = "a" if path.startswith("/") else "a/" + path
+    a_mode = "{:02o}{:04o}".format(a_mode_type, a_perms)
 
-    b_sha = NULL_SHA
-    b_path = "b" if path.startswith("/") else "b/" + path
+    a = DiffTarget(path=path, sha=a_sha, mode=a_mode)
+    b = DiffTarget(path=path, sha=NULL_SHA, mode=None)
 
-    print(f"diff --git {a_path} {b_path}")
-    print(f"deleted file mode {node_mode}")
-    print(f"index {short_sha(a_sha)}..{short_sha(b_sha)}")
-    print(f"--- {a_path}")
-    print(f"+++ {NULL_PATH}")
+    diff_print(a, b)
 
 
 def cmd_diff(args):

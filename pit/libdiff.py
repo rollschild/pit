@@ -7,6 +7,8 @@ SYMBOLS: dict[str, str] = {
     "del": "-",
 }
 
+NULL_PATH = "/dev/null"
+
 
 def diff(a: str | List[str], b: str | List[str]):
     return Diff.diff([*a] if type(a) is str else a, [*b] if type(b) is str else b)
@@ -123,6 +125,23 @@ class Diff:
 
             x = prev_x
             y = prev_y
+
+
+@dataclass
+class DiffTarget:
+    """
+    A target class to compare/print two diffs
+    """
+
+    path: str
+    sha: str
+    mode: str | None
+
+    def diff_path(self):
+        return self.path if self.mode is not None else NULL_PATH
+
+    def set_path(self, path_new: str):
+        self.path = path_new
 
 
 def main():
