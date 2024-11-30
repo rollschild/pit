@@ -380,8 +380,10 @@ class GitStatus:
                     # @FIXME - this **will** crash on symlinks to dir
                     with open(full_path, "rb") as fd:
                         new_sha = object_hash(fd, b"blob", None)
+                        mode = "{:02o}{:04o}".format(entry.mode_type, entry.mode_perms)
+                        new_mode = "{:o}".format(self.stats[entry.name].st_mode)
                         # if hashes are the same, then the files are actually the same
-                        same = entry.sha == new_sha
+                        same = entry.sha == new_sha and mode == new_mode
 
                         if not same:
                             self.index_worktree_changes[entry.name] = (
