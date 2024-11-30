@@ -309,4 +309,6 @@ $ poetry run pit <command>
 - screenshot of progress so far: diff with headers _only_
   ![pit diff](./assets/pit_diff_headers_only.png)
 
--
+- `git diff --cached` or `git diff --staged`
+  - changes staged for commit
+  - diff between the `HEAD` tree and the index

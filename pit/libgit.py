@@ -16,7 +16,7 @@ from math import ceil
 import os
 import re
 import sys
-from typing import IO, List, OrderedDict
+from typing import IO, Dict, List, OrderedDict, TypedDict
 import zlib
 
 from pit.libdiff import DiffTarget
@@ -136,6 +136,7 @@ class GitObject(ABC):
 class DiffStatus(Enum):
     MODIFIED = "modified"
     DELETED = "deleted"
+    ADDED = "added"
 
 
 class GitTreeNode:
@@ -289,7 +290,9 @@ class GitStatus:
     repo: GitRepository
     stats: dict[str, os.stat_result]
     changed: list
-    head_index_changes: list  # changes staged for commit
+
+    # changes staged for commit
+    head_index_changes: OrderedDict[str, DiffStatus]
 
     # dict of {path: state}
     index_worktree_changes: OrderedDict[str, DiffStatus]
@@ -302,7 +305,8 @@ class GitStatus:
         self.repo = repo
         self.stats = {}
         self.changed = []
-        self.head_index_changes = []
+        self.head_index_changes = OrderedDict()
+
         self.index_worktree_changes = OrderedDict()
         self.untracked_files = []
 
@@ -318,17 +322,17 @@ class GitStatus:
         head = tree_to_dict(self.repo, "HEAD")
         for entry in self.index.entries:
             if entry.name in head:
-                if head[entry.name] != entry.sha:
-                    pass
-                    # self.index_worktree_changes[entry.name] = DiffStatus.MODIFIED
+                if head[entry.name]["sha"] != entry.sha:
+                    self.head_index_changes[entry.name] = DiffStatus.MODIFIED
                 del head[entry.name]  # delete the key
             else:
-                print("  added:    ", entry.name)
+                # print("  added:    ", entry.name)
+                self.head_index_changes[entry.name] = DiffStatus.ADDED
 
         # keys still in HEAD are files that we have _not_ met in the index
         # these files have been deleted
-        for entry in head.keys():
-            print("  deleted: ", entry)
+        for path in head:
+            self.head_index_changes[path] = DiffStatus.DELETED
 
     def status_index_worktree(self):
         """
@@ -558,7 +562,6 @@ def tree_parse_single(raw: bytearray, start=0):
     filemode = raw[start:x]
     if len(filemode) == 5:
         # Normalize to six bytes
-        # TODO: BUG
         filemode = b"0" + filemode
 
     # Find NULL terminator of the path
@@ -837,7 +840,12 @@ def branch_get_active(repo):
     return False
 
 
-def tree_to_dict(repo, ref, prefix=""):
+class TreeSliceType(TypedDict):
+    sha: str
+    mode: bytearray
+
+
+def tree_to_dict(repo, ref, prefix="") -> Dict[str, TreeSliceType]:
     """
     Convert a tree to a (flat) dict.
     """
@@ -845,7 +853,7 @@ def tree_to_dict(repo, ref, prefix=""):
     tree_sha = object_find(repo, ref, fmt=b"tree")
     if tree_sha is None:
         raise Exception(f"Unable to find the tree sha with ref {ref}")
-    tree = object_read(repo, tree_sha)
+    tree = object_read(repo, tree_sha)  # tree object
     if not isinstance(tree, GitTree):
         raise Exception("Unable to find the tree!")
 
@@ -854,7 +862,7 @@ def tree_to_dict(repo, ref, prefix=""):
         if is_subtree := node.filemode.startswith(b"04"):
             ret.update(tree_to_dict(repo, node.sha, full_path))
         else:
-            ret[full_path] = node.sha
+            ret[full_path] = {"sha": node.sha, "mode": node.filemode}
 
     return ret
 
@@ -1733,6 +1741,12 @@ add_args = argsubparsers.add_parser("add", help="Add files contents to the index
 add_args.add_argument("path", nargs="+", help="Files to add.")
 
 diff_args = argsubparsers.add_parser("diff", help="Display diffs of files.")
+diff_args.add_argument(
+    "--cached",
+    dest="cached",
+    action="store_true",
+    help="Show changes staged for commit",
+)
 
 commit_args = argsubparsers.add_parser(
     "commit", help="Record changes to the repository."
@@ -1750,7 +1764,10 @@ def short_sha(sha: str) -> str:
 
 
 def diff_print_mode(a: DiffTarget, b: DiffTarget):
-    if b.mode is None:
+    if a.mode is None:
+        # when you create a new file then `git add` it
+        print(f"new file mode {b.mode}")
+    elif b.mode is None:
         print(f"deleted file mode {a.mode}")
     elif a.mode != b.mode:
         # compare file modes and display if different
@@ -1784,16 +1801,57 @@ def diff_print(a: DiffTarget, b: DiffTarget):
     diff_print_content(a, b)
 
 
-def difftarget_from_index(path: str) -> DiffTarget:
-    pass
+def difftarget_from_index(
+    repo: GitRepository, status: GitStatus, path: str
+) -> DiffTarget:
+    index = index_read(repo)
+    entry = index_find_entry_from_path(index, path)
+    if entry is None:
+        raise Exception(f"Unable to find the entry for path {path}!")
+
+    # when running `git diff`, it displays the diff of the file objects first,
+    # e.g. `index 182dce2..5b09b2b 100644`
+    # these two hexadecimal numbers are the object ID stored in the index and
+    # the hash of the current file respectively
+
+    a_sha = entry.sha
+    a_mode_type = entry.mode_type
+    a_perms = entry.mode_perms
+    a_mode = "{:02o}{:04o}".format(a_mode_type, a_perms)
+
+    return DiffTarget(path=path, sha=a_sha, mode=a_mode)
 
 
-def difftarget_from_file(path: str) -> DiffTarget:
-    pass
+def difftarget_from_head(repo: GitRepository, path: str) -> DiffTarget:
+    head = tree_to_dict(repo, "HEAD")
+    sha = head[path]["sha"]
+    mode = head[path]["mode"].decode("ascii")
+
+    return DiffTarget(path=path, sha=sha, mode=mode)
+
+
+def difftarget_from_file(
+    repo: GitRepository, status: GitStatus, path: str
+) -> DiffTarget:
+    index = index_read(repo)
+    entry = index_find_entry_from_path(index, path)
+    if entry is None:
+        raise Exception(f"Unable to find the entry for path {path}!")
+    # repo.worktree example: `/home/rollschild/projects/pit`
+    # entry.name example: `pit/libgit.py`
+    # `os.path.join` automatically adds `/` in between
+    full_path = os.path.join(repo.worktree, entry.name)
+    with open(full_path, "rb") as fd:
+        b_sha = object_hash(fd, b"blob", None)
+    if b_sha is None:
+        raise Exception(f"Unable to hash the file {path}!")
+    b_mode = "{:o}".format(status.stats.get(entry.name, {"st_mode": 33188}).st_mode)
+
+    return DiffTarget(path=path, sha=b_sha, mode=b_mode)
 
 
 def difftarget_from_nothing(path: str) -> DiffTarget:
-    pass
+    return DiffTarget(path=path, sha=NULL_SHA, mode=None)
 
 
 def diff_file_modified(repo: GitRepository, status: GitStatus, path: str):
@@ -1852,15 +1910,42 @@ def cmd_diff(args):
 
     status = GitStatus(repo)
 
-    # TODO
-    for path, state in status.index_worktree_changes.items():
-        match state:
-            case DiffStatus.MODIFIED:
-                diff_file_modified(repo, status, path)
-            case DiffStatus.DELETED:
-                diff_file_deleted(repo, path)
-            case _:
-                raise Exception("Unable to display diff for unknown type!")
+    if args.cached:
+        for path, state in status.head_index_changes.items():
+            match state:
+                case DiffStatus.MODIFIED:
+                    diff_print(
+                        difftarget_from_head(repo, path),
+                        difftarget_from_index(repo, status, path),
+                    )
+
+                case DiffStatus.DELETED:
+                    diff_print(
+                        difftarget_from_head(repo, path),
+                        difftarget_from_nothing(path),
+                    )
+                case DiffStatus.ADDED:
+                    diff_print(
+                        difftarget_from_nothing(path),
+                        difftarget_from_index(repo, status, path),
+                    )
+                case _:
+                    raise Exception("Unable to display diff for unknown type!")
+    else:
+        for path, state in status.index_worktree_changes.items():
+            match state:
+                case DiffStatus.MODIFIED:
+                    diff_print(
+                        difftarget_from_index(repo, status, path),
+                        difftarget_from_file(repo, status, path),
+                    )
+                case DiffStatus.DELETED:
+                    diff_print(
+                        difftarget_from_index(repo, status, path),
+                        difftarget_from_nothing(path),
+                    )
+                case _:
+                    raise Exception("Unable to display diff for unknown type!")
 
 
 def cmd_add(args):
@@ -2045,7 +2130,7 @@ def cmd_status_head_index(repo, index: GitIndex):
     head = tree_to_dict(repo, "HEAD")
     for entry in index.entries:
         if entry.name in head:
-            if head[entry.name] != entry.sha:
+            if head[entry.name]["sha"] != entry.sha:
                 print("  modified:", entry.name)
             del head[entry.name]  # delete the key
         else:
