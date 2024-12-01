@@ -19,7 +19,7 @@ import sys
 from typing import IO, Dict, List, OrderedDict, TypedDict
 import zlib
 
-from pit.libdiff import DiffTarget
+from pit.libdiff import DiffTarget, diff
 
 
 INDEX_FILE_MODE_DICT: dict[int, str] = {
@@ -1789,6 +1789,10 @@ def diff_print_content(a: DiffTarget, b: DiffTarget):
     print(f"--- {a.diff_path()}")
     print(f"+++ {b.diff_path()}")
 
+    edits = diff(a.data, b.data)
+    for edit in edits:
+        print(edit.to_str())
+
 
 def diff_print(a: DiffTarget, b: DiffTarget):
     if a.sha == b.sha and a.mode == b.mode:
@@ -1821,7 +1825,13 @@ def difftarget_from_index(
     a_perms = entry.mode_perms
     a_mode = "{:02o}{:04o}".format(a_mode_type, a_perms)
 
-    return DiffTarget(path=path, sha=a_sha, mode=a_mode)
+    obj = object_read(repo, a_sha)
+    if obj is None or not isinstance(obj, GitBlob):
+        raise Exception(f"Invalid object read from sha: {a_sha}")
+
+    return DiffTarget(
+        path=path, sha=a_sha, mode=a_mode, data=obj.blobdata.decode("utf8")
+    )
 
 
 def difftarget_from_head(repo: GitRepository, path: str) -> DiffTarget:
@@ -1829,7 +1839,11 @@ def difftarget_from_head(repo: GitRepository, path: str) -> DiffTarget:
     sha = head[path]["sha"]
     mode = head[path]["mode"].decode("ascii")
 
-    return DiffTarget(path=path, sha=sha, mode=mode)
+    obj = object_read(repo, sha)
+    if obj is None or not isinstance(obj, GitBlob):
+        raise Exception(f"Invalid object read from sha: {sha}")
+
+    return DiffTarget(path=path, sha=sha, mode=mode, data=obj.blobdata.decode("utf8"))
 
 
 def difftarget_from_file(
@@ -1843,66 +1857,60 @@ def difftarget_from_file(
     # entry.name example: `pit/libgit.py`
     # `os.path.join` automatically adds `/` in between
     full_path = os.path.join(repo.worktree, entry.name)
+    data = None
     with open(full_path, "rb") as fd:
+        data = fd.read()
         b_sha = object_hash(fd, b"blob", None)
-    if b_sha is None:
+    if b_sha is None or data is None:
         raise Exception(f"Unable to hash the file {path}!")
     b_mode = "{:o}".format(status.stats.get(entry.name, {"st_mode": 33188}).st_mode)
 
-    return DiffTarget(path=path, sha=b_sha, mode=b_mode)
+    return DiffTarget(path=path, sha=b_sha, mode=b_mode, data=data.decode("utf8"))
 
 
 def difftarget_from_nothing(path: str) -> DiffTarget:
-    return DiffTarget(path=path, sha=NULL_SHA, mode=None)
+    return DiffTarget(path=path, sha=NULL_SHA, mode=None, data="")
 
 
-def diff_file_modified(repo: GitRepository, status: GitStatus, path: str):
-    index = index_read(repo)
-    entry = index_find_entry_from_path(index, path)
-    if entry is None:
-        raise Exception(f"Unable to find the entry for path {path}!")
-
-    # when running `git diff`, it displays the diff of the file objects first,
-    # e.g. `index 182dce2..5b09b2b 100644`
-    # these two hexadecimal numbers are the object ID stored in the index and
-    # the hash of the current file respectively
-
-    a_sha = entry.sha
-    a_mode_type = entry.mode_type
-    a_perms = entry.mode_perms
-    a_mode = "{:02o}{:04o}".format(a_mode_type, a_perms)
-
-    # repo.worktree example: `/home/rollschild/projects/pit`
-    # entry.name example: `pit/libgit.py`
-    # `os.path.join` automatically adds `/` in between
-    full_path = os.path.join(repo.worktree, entry.name)
-    with open(full_path, "rb") as fd:
-        b_sha = object_hash(fd, b"blob", None)
-    if b_sha is None:
-        raise Exception(f"Unable to hash the file {path}!")
-    b_mode = "{:o}".format(status.stats.get(entry.name, {"st_mode": 33188}).st_mode)
-
-    a = DiffTarget(path=path, sha=a_sha, mode=a_mode)
-    b = DiffTarget(path=path, sha=b_sha, mode=b_mode)
-
-    diff_print(a, b)
+# def diff_file_modified(repo: GitRepository, status: GitStatus, path: str):
+# index = index_read(repo)
+# entry = index_find_entry_from_path(index, path)
+# if entry is None:
+# raise Exception(f"Unable to find the entry for path {path}!")
+#
+# a_sha = entry.sha
+# a_mode_type = entry.mode_type
+# a_perms = entry.mode_perms
+# a_mode = "{:02o}{:04o}".format(a_mode_type, a_perms)
+#
+# full_path = os.path.join(repo.worktree, entry.name)
+# with open(full_path, "rb") as fd:
+# b_sha = object_hash(fd, b"blob", None)
+# if b_sha is None:
+# raise Exception(f"Unable to hash the file {path}!")
+# b_mode = "{:o}".format(status.stats.get(entry.name, {"st_mode": 33188}).st_mode)
+#
+# a = DiffTarget(path=path, sha=a_sha, mode=a_mode)
+# b = DiffTarget(path=path, sha=b_sha, mode=b_mode)
+#
+# diff_print(a, b)
 
 
-def diff_file_deleted(repo: GitRepository, path: str):
-    index = index_read(repo)
-    entry = index_find_entry_from_path(index, path)
-    if entry is None:
-        raise Exception(f"Unable to find the entry for path {path}!")
-
-    a_sha = entry.sha
-    a_mode_type = entry.mode_type
-    a_perms = entry.mode_perms
-    a_mode = "{:02o}{:04o}".format(a_mode_type, a_perms)
-
-    a = DiffTarget(path=path, sha=a_sha, mode=a_mode)
-    b = DiffTarget(path=path, sha=NULL_SHA, mode=None)
-
-    diff_print(a, b)
+# def diff_file_deleted(repo: GitRepository, path: str):
+# index = index_read(repo)
+# entry = index_find_entry_from_path(index, path)
+# if entry is None:
+# raise Exception(f"Unable to find the entry for path {path}!")
+#
+# a_sha = entry.sha
+# a_mode_type = entry.mode_type
+# a_perms = entry.mode_perms
+# a_mode = "{:02o}{:04o}".format(a_mode_type, a_perms)
+#
+# a = DiffTarget(path=path, sha=a_sha, mode=a_mode)
+# b = DiffTarget(path=path, sha=NULL_SHA, mode=None)
+#
+# diff_print(a, b)
 
 
 def cmd_diff(args):

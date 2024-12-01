@@ -11,7 +11,9 @@ NULL_PATH = "/dev/null"
 
 
 def diff(a: str | List[str], b: str | List[str]):
-    return Diff.diff([*a] if type(a) is str else a, [*b] if type(b) is str else b)
+    return Diff.diff(
+        a.splitlines() if type(a) is str else a, b.splitlines() if type(b) is str else b
+    )
 
 
 @dataclass
@@ -136,6 +138,7 @@ class DiffTarget:
     path: str
     sha: str
     mode: str | None
+    data: str
 
     def diff_path(self):
         return self.path if self.mode is not None else NULL_PATH
@@ -148,6 +151,6 @@ def main():
     a = "ABCABBA"
     b = "CBABAC"
 
-    edits = diff(a, b)
+    edits = diff([*a], [*b])
     for edit in edits:
         print(edit.to_str())
