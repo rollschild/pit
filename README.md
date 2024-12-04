@@ -312,3 +312,7 @@ $ poetry run pit <command>
 - `git diff --cached` or `git diff --staged`
   - changes staged for commit
   - diff between the `HEAD` tree and the index
+- when displaying diffs, Git splits changes within a file into **hunks**
+- **hunks**
+  - defined as a set of changes whose context overlaps
+  - if **context window** is 3 lines, then any pair of changes separated by up to 6 unchanged lines are part of the same hunk
