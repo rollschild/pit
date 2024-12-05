@@ -35,6 +35,7 @@ $ poetry run pit <command>
 - `pit rm <paths>`
 - `pit add <paths>`
 - `pit commit -m <message>`
+- `pit diff`
 
 ## Development Logs
 
@@ -285,4 +286,33 @@ $ poetry run pit <command>
   - write new tree to the repo
   - add the tree to the directory's parent
   - iterate over the next directory
--
+
+### The Myers Diff Algorithm
+
+- being greedy
+- finding the **Shortest Edit Script (SES)**
+- finding the **Longest Common Subsequence**
+- when `git rm` a file, the `git diff` shows:
+  ```console
+  diff --git a/some_file b/some_file
+  deleted file mode 100644
+  index <hash>...0000000
+  --- a/some_file
+  +++ /dev/null
+  ```
+- if file mode has been changed,
+  ```console
+  diff --git a/some_file b/some_file
+  old mode 100644
+  new mode 100755
+  ```
+- screenshot of progress so far: diff with headers _only_
+  ![pit diff](./assets/pit_diff_headers_only.png)
+
+- `git diff --cached` or `git diff --staged`
+  - changes staged for commit
+  - diff between the `HEAD` tree and the index
+- when displaying diffs, Git splits changes within a file into **hunks**
+- **hunks**
+  - defined as a set of changes whose context overlaps
+  - if **context window** is 3 lines, then any pair of changes separated by up to 6 unchanged lines are part of the same hunk
