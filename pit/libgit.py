@@ -19,7 +19,7 @@ import sys
 from typing import IO, Dict, List, OrderedDict, TypedDict
 import zlib
 
-from pit.libdiff import DiffTarget, diff, diff_hunks
+from pit.libdiff import DiffTarget, Edit, EditStatus, diff, diff_hunks
 
 
 INDEX_FILE_MODE_DICT: dict[int, str] = {
@@ -27,6 +27,15 @@ INDEX_FILE_MODE_DICT: dict[int, str] = {
     0b1010: "symlink",
     0b1110: "git link",
 }
+
+
+class ColorCodes(Enum):
+    BOLD = "\033[1m"
+    RED = "\033[91m"
+    GREEN = "\033[92m"
+    CYAN = "\033[96m"
+    END = "\033[0m"
+
 
 NULL_SHA = "0" * 40
 
@@ -1765,22 +1774,41 @@ def short_sha(sha: str) -> str:
     return sha[0:7]
 
 
+def diff_print_header(text: str):
+    print(ColorCodes.BOLD.value + text + ColorCodes.END.value)
+
+
 def diff_print_mode(a: DiffTarget, b: DiffTarget):
     if a.mode is None:
         # when you create a new file then `git add` it
-        print(f"new file mode {b.mode}")
+        diff_print_header(f"new file mode {b.mode}")
     elif b.mode is None:
-        print(f"deleted file mode {a.mode}")
+        diff_print_header(f"deleted file mode {a.mode}")
     elif a.mode != b.mode:
         # compare file modes and display if different
-        print(f"old mode {a.mode}")
-        print(f"new mode {b.mode}")
+        diff_print_header(f"old mode {a.mode}")
+        diff_print_header(f"new mode {b.mode}")
+
+
+def diff_print_edit(edit: Edit):
+    text = edit.to_str().rstrip()
+
+    match edit.edit_type:
+        case EditStatus.EQL:
+            print(text)
+        case EditStatus.INS:
+            print(ColorCodes.GREEN.value + text + ColorCodes.END.value)
+        case EditStatus.DEL:
+            print(ColorCodes.RED.value + text + ColorCodes.END.value)
+        case _:
+            print(text)
 
 
 def diff_print_hunk(hunk):
-    print(hunk.header())
+    print(ColorCodes.CYAN.value + hunk.header() + ColorCodes.END.value)
+
     for edit in hunk.edits:
-        print(edit.to_str())
+        diff_print_edit(edit)
 
 
 def diff_print_content(a: DiffTarget, b: DiffTarget):
@@ -1791,9 +1819,9 @@ def diff_print_content(a: DiffTarget, b: DiffTarget):
     if a.mode == b.mode:
         sha_range += f" {a.mode}"
 
-    print(sha_range)
-    print(f"--- {a.diff_path()}")
-    print(f"+++ {b.diff_path()}")
+    diff_print_header(sha_range)
+    diff_print_header(f"--- {a.diff_path()}")
+    diff_print_header(f"+++ {b.diff_path()}")
 
     hunks = diff_hunks(a.data, b.data)
     for hunk in hunks:
@@ -1807,7 +1835,7 @@ def diff_print(a: DiffTarget, b: DiffTarget):
     a.set_path("a" if a.path.startswith("/") else "a/" + a.path)
     b.set_path("b" if b.path.startswith("/") else "b/" + b.path)
 
-    print(f"diff --git {a.path} {b.path}")
+    diff_print_header(f"diff --git {a.path} {b.path}")
 
     diff_print_mode(a, b)
     diff_print_content(a, b)
